@@ -8,6 +8,7 @@
 
 | 版本 | 日期 | 变更摘要 | git tag |
 |---|---|---|---|
+| 1.2.1 | 2026-08-30 | 修复：聊天界面流式回答中文乱码（ç¬è®° 式 mojibake）——LM Studio 的 `text/event-stream` 响应头不带 charset，requests 按 RFC 默认 ISO-8859-1 解码（`iter_lines(decode_unicode=True)`），UTF-8 中文增量全部变乱码（阻塞模式走 `resp.json()` 有编码探测故正常）；改为逐行取原始 bytes 显式 UTF-8 解码；新增 2 项单测 `tests/test_rag_client.py` | `v1.2.1` |
 | 1.2.0 | 2026-08-30 | 新增：**浏览器知识问答界面** `GET /ui`（`static/chat.html` 单页应用，零 CDN 依赖遵守离线隐私承诺）——SSE 流式逐字渲染回答、来源引用 chips（标题+路径+余弦距离）、`/status` 健康角标轮询；此前问答 API 仅能通过 curl / `/docs` 调试台 / 自写脚本调用 | `v1.2.0` |
 | 1.1.3 | 2026-08-30 | 修复：长草稿归档报 400「exceeds the available context size」（LM Studio 侧表现为 Channel Error）被误判为 response_format 不支持而无效重发一发注定失败的请求——`LLMClient.chat` 现识别上下文超限错误，直接抛出带操作指引的 RuntimeError（以更大 context length 重载模型或拆分草稿），不误触回退；配套：模型已以 32k 上下文重载（`lms load qwen3-14b -c 32768 --parallel 1`，M4 Pro 24GB 实测可容纳 2 万字符草稿归档，耗时 144s）；新增 3 项单测 `tests/test_llm_client.py` | `v1.1.3` |
 | 1.1.2 | 2026-08-30 | 修复：「最近错误分析」误报历史错误——`recent_errors` 原扫描各日志「尾部 3000 行」，而日志 append-only 从不轮转，v1.0.0 时代 pydantic 崩溃循环的 Traceback 被永久当作"最近错误"展示；改为**字节偏移增量扫描**（状态持久化 `logs/.menubar_err_state.json`：首跑从 EOF 清零历史、新文件全文扫描、截断/轮转自动重读、末尾半行顺延；`consume=False` 供综合健康检查"只看不消费"，不抢走错误菜单的新错误）；新增 8 项单测 `tests/test_recent_errors.py` | `v1.1.2` |
@@ -71,7 +72,7 @@ CLI：`--check` 环境自检｜`--scan` 批处理积压｜`--once 文件 --vault
 | 离线闸门 | 模块顶部 `os.environ` | `HF_HUB_OFFLINE=1` / `TRANSFORMERS_OFFLINE=1` 等，必须在 import 前设置 |
 | 嵌入 | `BGEEmbeddings` | 本地 sentence-transformers 加载 bge-small-zh-v1.5；检索 query 加官方指令前缀；MPS 不可用回退 CPU |
 | 索引 | `VaultIndexer` | Markdown 标题+递归分块；mtime 短路 + md5 兜底的增量 `sync`；`rebuild` 全量重建；`search` 余弦检索；排除 `rag.exclude_folders` |
-| 生成 | `LMStudioClient` | 阻塞 + SSE 流式两种调用；RAG 提示词拼装 |
+| 生成 | `LMStudioClient` | 阻塞 + SSE 流式两种调用（流式逐行 bytes 显式 UTF-8 解码，防 requests 对无 charset 头按 ISO-8859-1 解码的乱码陷阱）；RAG 提示词拼装 |
 | API | FastAPI `lifespan`、`/ask` `/health` `/status` `/reindex`、`GET /ui` | lifespan 启动后台周期 sync 线程；`/ask` 支持 `stream:true`（SSE：sources→message×N→done）；`/ui` 返回 `static/chat.html` 单页聊天界面 |
 
 持久化：索引状态 `data/index_state.json`（路径→{mtime,md5}）；向量库 `data/chroma/`。

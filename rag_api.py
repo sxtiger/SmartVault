@@ -426,15 +426,23 @@ class LMStudioClient:
 
     def stream_chat(self, messages: List[Dict[str, str]],
                     temperature: Optional[float] = None) -> Iterator[str]:
-        """生成器：逐段产出模型输出文本增量。"""
+        """生成器：逐段产出模型输出文本增量。
+
+        编码陷阱：LM Studio 的 text/event-stream 响应头不带 charset，requests
+        会按 RFC 默认 ISO-8859-1 解码（decode_unicode=True 将得到 ç¬è®° 式乱码），
+        因此必须逐行取原始 bytes 并显式按 UTF-8 解码。
+        """
         with requests.post(f"{self.base_url}/chat/completions",
                            json=self._payload(messages, True, temperature),
                            timeout=(10, self.timeout), stream=True) as resp:
             resp.raise_for_status()
-            for raw in resp.iter_lines(decode_unicode=True):
-                if not raw or not raw.startswith("data:"):
+            for raw in resp.iter_lines():
+                if not raw:
                     continue
-                payload = raw[len("data:"):].strip()
+                line = raw.decode("utf-8", errors="replace")
+                if not line.startswith("data:"):
+                    continue
+                payload = line[len("data:"):].strip()
                 if payload == "[DONE]":
                     break
                 try:
