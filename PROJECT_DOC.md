@@ -8,6 +8,7 @@
 
 | 版本 | 日期 | 变更摘要 | git tag |
 |---|---|---|---|
+| 1.0.1 | 2026-08-30 | 修复：① `BGEEmbeddings.QUERY_INSTRUCTION` 缺 ClassVar 注解导致 pydantic v2 下类定义即崩（RAG 服务无法启动）；② install_launchd.sh 的 bootout/bootstrap 竞态导致 `Bootstrap failed: 5`（改为等待旧实例真正拆除 + bootstrap 重试） | `v1.0.1` |
 | 1.0.0 | 2026-08-30 | 首个完整版本：模块 A 摄入归档守护进程 + 模块 B 本地 RAG 服务 + launchd 自启 + 22 项纯函数单测 | `v1.0.0` |
 
 版本号约定：功能/行为变更递增次版本号（X.**Y**.Z），缺陷修复递增修订号（X.Y.**Z**）。
@@ -168,6 +169,9 @@ git tag vX.Y.Z && git push && git push --tags
 | launchd 反复重启（10s 一次） | venv 路径失效（重建过 .venv） | 重跑 `scripts/install_launchd.sh` 重新生成 plist |
 | 改了 chunk_size 检索无变化 | 未全量重建 | `POST /reindex {"rebuild": true}` |
 | `--once` 报草稿不存在 | 相对路径基于该 Vault 收件箱解析 | 传绝对路径，或确认文件名 |
+| `Bootstrap failed: 5: Input/output error` | bootout 拆旧实例是异步的，立刻 bootstrap 同名标签时旧实例未拆完（竞态） | 已在 install_launchd.sh 内置等待+重试；手动操作时 bootout 后等 1-2 秒再 bootstrap |
+| 改代码后 RAG 服务仍报旧错误 | launchd 跑的是旧进程 | `bash scripts/install_launchd.sh` 重装（会自动重启两个服务） |
+| 自定义 pydantic 模型子类在类定义时抛 `PydanticUserError` | pydantic v2 把类体内未注解的裸赋值当模型字段 | 给常量加 `ClassVar[...]` 注解（见 `BGEEmbeddings.QUERY_INSTRUCTION`） |
 
 ## 8. 技术债与已知限制（诚实清单）
 

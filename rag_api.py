@@ -41,7 +41,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, ClassVar, Dict, Iterator, List, Optional, Tuple
 
 import requests
 import uvicorn
@@ -123,9 +123,13 @@ def setup_logging(cfg: Dict[str, Any], level: int = logging.INFO) -> None:
 
 # ================================================================== 嵌入模型
 class BGEEmbeddings(HuggingFaceEmbeddings):
-    """bge 中文系列模型的检索问句指令包装（官方推荐 query 前缀）。"""
+    """bge 中文系列模型的检索问句指令包装（官方推荐 query 前缀）。
 
-    QUERY_INSTRUCTION = "为这个句子生成表示以用于检索相关文章："
+    注意：HuggingFaceEmbeddings 是 pydantic v2 模型，类体内裸赋值的属性
+    会被当成"未注解字段"而在类定义时抛错，因此必须用 ClassVar 注解。
+    """
+
+    QUERY_INSTRUCTION: ClassVar[str] = "为这个句子生成表示以用于检索相关文章："
 
     def embed_query(self, text: str) -> List[float]:
         return super().embed_query(self.QUERY_INSTRUCTION + text)
