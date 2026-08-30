@@ -8,6 +8,7 @@
 
 | 版本 | 日期 | 变更摘要 | git tag |
 |---|---|---|---|
+| 1.1.2 | 2026-08-30 | 修复：「最近错误分析」误报历史错误——`recent_errors` 原扫描各日志「尾部 3000 行」，而日志 append-only 从不轮转，v1.0.0 时代 pydantic 崩溃循环的 Traceback 被永久当作"最近错误"展示；改为**字节偏移增量扫描**（状态持久化 `logs/.menubar_err_state.json`：首跑从 EOF 清零历史、新文件全文扫描、截断/轮转自动重读、末尾半行顺延；`consume=False` 供综合健康检查"只看不消费"，不抢走错误菜单的新错误）；新增 8 项单测 `tests/test_recent_errors.py` | `v1.1.2` |
 | 1.1.1 | 2026-08-30 | 修复：① 菜单栏 ● 图标在刘海屏 MacBook 上不可见——状态项被 macOS 26 ControlCenter 以 ephemeral 定位排入刘海遮挡区（本机 x 663..848），launchd 每次重启 PID 变化又使位置不持久；对策：状态项设 `autosaveName`（位置跨重启持久化，⌘ 拖拽后被记住）+ 启动自诊断（AX 坐标与刘海检测写入 `logs/menubar.stderr.log`，被遮挡时告警）；② 「启动」改幂等——已运行则跳过重启（原逻辑对运行中的服务做 bootout→bootstrap 全量重启，RAG 重载模型 ~17s 期间图标 ⚠ 易被误判为故障）；③ 启动/重启弹窗追加「RAG 加载 10–30 秒期间 ⚠/◐ 属正常」提示 | `v1.1.1` |
 | 1.1.0 | 2026-08-30 | 新增菜单栏控制台 `menu_bar_app.py`（rumps）：状态栏图标实时显示服务健康度（●/◐/○/⚠，5 秒轮询）；下拉菜单提供启动/停止/重启/卸载（launchd bootstrap/bootout，含竞态等待）、控制台自身开机自启开关（`com.user.aibrain.menubar`）、综合健康检查、最近错误聚合分析、Terminal 实时日志；`scripts/build_menubar_app.sh` 生成 `SmartVaultMenuBar.app`——因 macOS TCC 限制（GUI app 读不了 ~/Documents），.app 设计为"确保 launchd 代理运行"的启动器（双击即注册开机自启）；单例锁防双开 | `v1.1.0` |
 | 1.0.1 | 2026-08-30 | 修复：① `BGEEmbeddings.QUERY_INSTRUCTION` 缺 ClassVar 注解导致 pydantic v2 下类定义即崩（RAG 服务无法启动）；② install_launchd.sh 的 bootout/bootstrap 竞态导致 `Bootstrap failed: 5`（改为等待旧实例真正拆除 + bootstrap 重试） | `v1.0.1` |
@@ -81,7 +82,7 @@ macOS 状态栏常驻应用（rumps/PyObjC），是 launchd 的图形前端 + �
 |---|---|---|
 | 服务描述 | `ServiceSpec`（INGEST / RAG / MENUBAR 三个实例） | label / 日志 / 模板路径；`render()` 做 `@PROJECT_DIR@`/`@PYTHON@` 占位符替换（与 install_launchd.sh 等价） |
 | launchd 封装 | `svc_info` `svc_state` `svc_start/stop/uninstall` | `launchctl print` 判 installed；`list` 解析 PID 与上次退出码（区分 running/starting/crashed/stopped）；启动幂等（已运行直接返回，不再隐式重启）；未运行时 bootout→等待→bootstrap×5 重试（复用 v1.0.1 竞态修复）；停止=bootout（保留 plist）；卸载=bootout+删 plist |
-| 诊断 | `port_open` `http_json` `recent_errors` `tail_in_terminal` | 端口探测（不做阻塞 HTTP）；`/health` `/status` 拉取；日志尾部错误正则聚合 + 连续去重；osascript 让 Terminal 执行 tail -f |
+| 诊断 | `port_open` `http_json` `recent_errors` `tail_in_terminal` | 端口探测（不做阻塞 HTTP）；`/health` `/status` 拉取；日志错误**增量扫描**（按字节偏移只报自上次检查以来的新增，状态持久化 `logs/.menubar_err_state.json`；首跑清零历史、截断/轮转自动重读、末尾半行顺延、连续去重；`consume=False` 供健康检查只看不消费）；osascript 让 Terminal 执行 tail -f |
 | 单例锁 | `_acquire_single_instance_lock` | `fcntl.flock(logs/.menubar.lock)`；重复实例直接退出（bootstrap 安装自启项时靠它避免双图标） |
 | UI | `SmartVaultBar`（rumps.App） | `refresh()` 仅状态 key 变化时重建菜单（防闪烁）；`@rumps.timer(5)` 轮询；title 动态：●/◐/○/⚠；`_full_check` 弹窗逐项 ✔/✘；`_log_item_geometry` 启动自诊断（状态项 AX 坐标 + 刘海遮挡检测写 stderr；`autosaveName` 位置持久化） |
 
