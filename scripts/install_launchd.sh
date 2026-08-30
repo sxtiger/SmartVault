@@ -3,12 +3,19 @@
 # SmartVault launchd 服务一键安装（生成 plist 并 bootstrap 到 launchd）
 # 用法：  bash scripts/install_launchd.sh
 # 自定义 Python：PYTHON=/path/to/python bash scripts/install_launchd.sh
+#
+# 已知坑（本脚本已处理）：
+#  1. bootout 拆除服务是异步的，紧接着 bootstrap 同名标签会报
+#     "Bootstrap failed: 5: Input/output error"（旧实例还没拆完）
+#     → bootout 后轮询等待作业真正消失，bootstrap 失败自动重试
+#  2. plist 若带 com.apple.quarantine 属性会被 launchd 拒绝 → 主动清除
 # =====================================================================
-set -euo pipefail
+set -uo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PYTHON_BIN="${PYTHON:-$PROJECT_DIR/.venv/bin/python}"
 UID_NUM="$(id -u)"
+FAILED=0
 
 if [ ! -x "$PYTHON_BIN" ]; then
     echo "✗ 未找到虚拟环境 Python：$PYTHON_BIN"
@@ -18,17 +25,55 @@ fi
 
 mkdir -p "$PROJECT_DIR/logs" "$HOME/Library/LaunchAgents"
 
-for LABEL in com.user.aibrain com.user.aibrain.rag; do
-    SRC="$PROJECT_DIR/launchd/$LABEL.plist"
-    DST="$HOME/Library/LaunchAgents/$LABEL.plist"
+job_exists() {  # 作业是否还在 launchd 域中
+    launchctl print "gui/$UID_NUM/$1" >/dev/null 2>&1
+}
+
+wait_job_gone() {  # 等待作业从 launchd 域真正消失（最多 ~10s）
+    local label="$1" i
+    for i in $(seq 1 20); do
+        job_exists "$label" || return 0
+        sleep 0.5
+    done
+    return 1
+}
+
+install_one() {
+    local label="$1" src dst i
+    src="$PROJECT_DIR/launchd/$label.plist"
+    dst="$HOME/Library/LaunchAgents/$label.plist"
     sed -e "s|@PROJECT_DIR@|$PROJECT_DIR|g" \
-        -e "s|@PYTHON@|$PYTHON_BIN|g" "$SRC" > "$DST"
-    # 幂等：先卸载旧实例再安装
-    launchctl bootout "gui/$UID_NUM/$LABEL" 2>/dev/null || true
-    launchctl bootstrap "gui/$UID_NUM" "$DST"
-    echo "✓ 已安装并启动：$LABEL -> $DST"
-done
+        -e "s|@PYTHON@|$PYTHON_BIN|g" "$src" > "$dst"
+    chmod 644 "$dst"
+    xattr -d com.apple.quarantine "$dst" 2>/dev/null || true
+
+    # 幂等：先拆除旧实例并等待其真正退出
+    if job_exists "$label"; then
+        launchctl bootout "gui/$UID_NUM/$label" 2>/dev/null || true
+        wait_job_gone "$label" || echo "  ⚠ 旧实例拆除缓慢，继续尝试…"
+    fi
+
+    # bootstrap（带重试，规避拆除竞态导致的 error 5）
+    for i in 1 2 3 4 5; do
+        if launchctl bootstrap "gui/$UID_NUM" "$dst" 2>/tmp/aibrain_install_err.$$; then
+            echo "✓ 已安装并启动：$label"
+            return 0
+        fi
+        sleep 1
+    done
+    echo "✗ $label 安装失败："
+    sed 's/^/    /' /tmp/aibrain_install_err.$$ 2>/dev/null
+    rm -f /tmp/aibrain_install_err.$$
+    FAILED=1
+    return 1
+}
+
+install_one com.user.aibrain
+install_one com.user.aibrain.rag
 
 echo ""
+echo "当前 launchd 状态："
+launchctl list | grep aibrain || echo "（无 aibrain 作业在运行！）"
+echo ""
 echo "日志：tail -f $PROJECT_DIR/logs/*.log"
-echo "状态：launchctl list | grep aibrain"
+exit $FAILED
