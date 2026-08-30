@@ -631,7 +631,7 @@ SYSTEM_PROMPT = """你是「SmartVault 智能仓库」的资深知识管理图�
    - "optimized_content": 字符串，整理排版后的完整 Markdown 正文；仅当系统未声明“原文保留模式”时才需要填写，声明后必须为空字符串 ""。
 
 【整理规则】
-1. target_folder 必须优先从用户给出的“仓库目录树”中选择已有目录；目录树中确无合适目录时才允许新建，且最多二级深度；严禁使用“待处理笔记”或仓库根目录。
+1. target_folder 必须优先从用户给出的“仓库目录树”中选择已有目录；目录树中确无合适目录时，须依据笔记主题**新建简洁的一级目录**（2~6 个字，如“开发环境”“AI 工具”“网络工具”），让分类体系随归档自然生长，同主题笔记后续复用同一目录；最多二级深度；严禁使用“待处理笔记”、仓库根目录，以及“未分类”“笔记”“文档”“其他”等无信息量的目录名。
 2. optimized_content 遵守 Obsidian Markdown 规范：文件内不要重复一级标题（标题由文件名承担），用二级/三级标题分节，善用列表与引用；正文中的所有事实、数字、百分比、指标、人名、结论必须逐字来自草稿原文或附件转录，严禁编造原文不存在的任何数字、比例或事实；整理仅限标题层级、列表化与删除冗余空白，禁止缩写、扩写或补充原文没有的内容；草稿为对话/问答体时必须保持原有问答结构与措辞，禁止重组为摘要式笔记。
 3. 为正文涉及的关键概念、人物、书名、项目、技术名词添加 [[双链]]；目录树中的已有目录名可优先作为双链目标，以便沉淀知识网络。
 4. 附件的解析文本必须融入正文：以“> [!quote]- 附件：文件名”折叠引用块或独立小节呈现，冗长转录可提炼要点但不得丢失信息。
@@ -753,6 +753,42 @@ def choose_target_dir(vault: Vault, folder_str: str, proc: Dict[str, Any],
     fb = vault.root / fallback
     fb.mkdir(parents=True, exist_ok=True)
     return fb
+
+
+def prune_empty_dirs(inbox: Path) -> int:
+    """清理收件箱内的空目录（自底向上，供归档后与启动补扫时调用）。
+
+    归档移走附件后常残留空的 ``附件/`` 等目录。仅当目录为空、或只含
+    Finder 元数据（.DS_Store）时才删除；收件箱根目录本身永不删除；
+    含任何真实文件（含非 .DS_Store 的隐藏文件）的目录一律保留，
+    因此不会误删正在等待附件的待处理草稿所在目录。返回删除的目录数。
+    """
+    try:
+        dirs = [p for p in inbox.rglob("*") if p.is_dir()]
+    except OSError:
+        return 0
+    removed = 0
+    # 深度优先：先删空的子目录，父目录才可能随之变空
+    for d in sorted(dirs, key=lambda p: len(p.parts), reverse=True):
+        try:
+            entries = list(d.iterdir())
+        except OSError:
+            continue
+        for e in entries:
+            if e.name != ".DS_Store":
+                break
+        else:
+            for e in entries:
+                try:
+                    e.unlink()
+                except OSError:
+                    pass
+            try:
+                d.rmdir()
+                removed += 1
+            except OSError:
+                pass
+    return removed
 
 
 def unique_path(p: Path) -> Path:
@@ -944,7 +980,8 @@ def run_pipeline(cfg: Dict[str, Any], client: LLMClient, vault: Vault,
     # 6) 移动附件（含改名去重），并改写正文中的引用
     moved_map: Dict[str, str] = {}
     attach_dir = final_md.parent / subfolder if subfolder else final_md.parent
-    attach_dir.mkdir(parents=True, exist_ok=True)
+    if attachments:  # 无附件不预创建目录，避免遗留空 附件/ 目录
+        attach_dir.mkdir(parents=True, exist_ok=True)
     for _, src in attachments:
         try:
             dest = unique_path(attach_dir / src.name)
@@ -962,6 +999,8 @@ def run_pipeline(cfg: Dict[str, Any], client: LLMClient, vault: Vault,
         md_path.unlink()
     except OSError:
         LOG.exception("草稿清理失败（不影响归档）：%s", md_path)
+    if (pruned := prune_empty_dirs(vault.inbox)) > 0:
+        LOG.info("收件箱空目录清理：删除 %d 个（如归档后残留的空 附件/ 目录）", pruned)
 
     # 8) 反向写入 ai_context.md 历史索引 + 唤醒 Obsidian
     append_ai_context(vault, meta, final_md)
@@ -1013,6 +1052,7 @@ class VaultState:
             if f.name.startswith("."):
                 continue
             self.on_event(f, is_delete=False)
+        prune_empty_dirs(self.vault.inbox)
 
     # ---- 调度线程：等收件箱安静 + 文件大小稳定后入队 ----
     def _scheduler(self) -> None:
