@@ -32,3 +32,9 @@ models/*
 .vscode/
 *.swp
 
+# ===== 菜单栏 .app 构建产物（scripts/build_menubar_app.sh 生成）=====
+*.app
+
+# ===== 菜单栏单例锁 =====
+logs/.menubar.lock
+

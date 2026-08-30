@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.user.aibrain.menubar</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>@PYTHON@</string>
+        <string>-u</string>
+        <string>@PROJECT_DIR@/menu_bar_app.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>@PROJECT_DIR@</string>
+
+    <!-- 登录即启动；KeepAlive=false：用户手动退出后不再被拉起 -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <false/>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>@PROJECT_DIR@/logs/menubar.stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>@PROJECT_DIR@/logs/menubar.stderr.log</string>
+</dict>
+</plist>

@@ -8,6 +8,7 @@
 
 | 版本 | 日期 | 变更摘要 | git tag |
 |---|---|---|---|
+| 1.1.0 | 2026-08-30 | 新增菜单栏控制台 `menu_bar_app.py`（rumps）：状态栏图标实时显示服务健康度（●/◐/○/⚠，5 秒轮询）；下拉菜单提供启动/停止/重启/卸载（launchd bootstrap/bootout，含竞态等待）、控制台自身开机自启开关（`com.user.aibrain.menubar`）、综合健康检查、最近错误聚合分析、Terminal 实时日志；`scripts/build_menubar_app.sh` 生成 `SmartVaultMenuBar.app`——因 macOS TCC 限制（GUI app 读不了 ~/Documents），.app 设计为"确保 launchd 代理运行"的启动器（双击即注册开机自启）；单例锁防双开 | `v1.1.0` |
 | 1.0.1 | 2026-08-30 | 修复：① `BGEEmbeddings.QUERY_INSTRUCTION` 缺 ClassVar 注解导致 pydantic v2 下类定义即崩（RAG 服务无法启动）；② install_launchd.sh 的 bootout/bootstrap 竞态导致 `Bootstrap failed: 5`（改为等待旧实例真正拆除 + bootstrap 重试） | `v1.0.1` |
 | 1.0.0 | 2026-08-30 | 首个完整版本：模块 A 摄入归档守护进程 + 模块 B 本地 RAG 服务 + launchd 自启 + 22 项纯函数单测 | `v1.0.0` |
 
@@ -70,6 +71,20 @@ CLI：`--check` 环境自检｜`--scan` 批处理积压｜`--once 文件 --vault
 | API | FastAPI `lifespan`、`/ask` `/health` `/status` `/reindex` | lifespan 启动后台周期 sync 线程；`/ask` 支持 `stream:true`（SSE：sources→message×N→done） |
 
 持久化：索引状态 `data/index_state.json`（路径→{mtime,md5}）；向量库 `data/chroma/`。
+
+### 2.3 menu_bar_app.py（菜单栏控制台，约 465 行）
+
+macOS 状态栏常驻应用（rumps/PyObjC），是 launchd 的图形前端 + 诊断面板。
+
+| 层 | 关键符号 | 职责 / 修改入口 |
+|---|---|---|
+| 服务描述 | `ServiceSpec`（INGEST / RAG / MENUBAR 三个实例） | label / 日志 / 模板路径；`render()` 做 `@PROJECT_DIR@`/`@PYTHON@` 占位符替换（与 install_launchd.sh 等价） |
+| launchd 封装 | `svc_info` `svc_state` `svc_start/stop/uninstall` | `launchctl print` 判 installed；`list` 解析 PID 与上次退出码（区分 running/starting/crashed/stopped）；启动走 bootout→等待→bootstrap×5 重试（复用 v1.0.1 竞态修复）；停止=bootout（保留 plist）；卸载=bootout+删 plist |
+| 诊断 | `port_open` `http_json` `recent_errors` `tail_in_terminal` | 端口探测（不做阻塞 HTTP）；`/health` `/status` 拉取；日志尾部错误正则聚合 + 连续去重；osascript 让 Terminal 执行 tail -f |
+| 单例锁 | `_acquire_single_instance_lock` | `fcntl.flock(logs/.menubar.lock)`；重复实例直接退出（bootstrap 安装自启项时靠它避免双图标） |
+| UI | `SmartVaultBar`（rumps.App） | `refresh()` 仅状态 key 变化时重建菜单（防闪烁）；`@rumps.timer(5)` 轮询；title 动态：●/◐/○/⚠；`_full_check` 弹窗逐项 ✔/✘ |
+
+关键决策：MENUBAR 自启项 `KeepAlive=false`（手动退出不被拉起，RunAtLoad 登录启动）；对 KeepAlive 服务"停止"必须 bootout（kill 会被 launchd 复活）；**TCC 规避**——经 LaunchServices（Finder/open）启动的 GUI app 无 `~/Documents` 读权限（`PermissionError: pyvenv.cfg`），故 `.app` 仅是"确保 launchd 代理运行"的启动器（plist 内容构建时硬编码、运行时不读项目文件），菜单栏进程一律由 launchd 拉起（双击 .app = 安装/唤醒代理，同时注册开机自启）。
 
 ## 3. 配置参考（config.json 全字段语义）
 
@@ -172,6 +187,11 @@ git tag vX.Y.Z && git push && git push --tags
 | `Bootstrap failed: 5: Input/output error` | bootout 拆旧实例是异步的，立刻 bootstrap 同名标签时旧实例未拆完（竞态） | 已在 install_launchd.sh 内置等待+重试；手动操作时 bootout 后等 1-2 秒再 bootstrap |
 | 改代码后 RAG 服务仍报旧错误 | launchd 跑的是旧进程 | `bash scripts/install_launchd.sh` 重装（会自动重启两个服务） |
 | 自定义 pydantic 模型子类在类定义时抛 `PydanticUserError` | pydantic v2 把类体内未注解的裸赋值当模型字段 | 给常量加 `ClassVar[...]` 注解（见 `BGEEmbeddings.QUERY_INSTRUCTION`） |
+| 菜单栏图标不出现 | rumps 未安装 / Python 非 GUI 会话 | `pip install rumps`；确认用 `.venv/bin/python menu_bar_app.py` 或 `open SmartVaultMenuBar.app` 启动，看 `logs/menubar.stderr.log` |
+| 双击 .app 后秒退 / `PermissionError: pyvenv.cfg` | macOS TCC：LaunchServices 启动的 GUI app 默认无 `~/Documents` 读权限 | 用官方 `.app`（仅做 launchctl，进程由 launchd 拉起）即可规避；若自行改为直接 exec python 则需给 app 授"完全磁盘访问"或在终端运行 |
+| 菜单里点"停止"后服务又复活 | KeepAlive 作业 `launchctl kill` 后会被拉起 | 属正常——菜单"停止"已用 bootout（会连同自启一起失效），需恢复点"启动"即可 |
+| 菜单栏点了"启动"但 RAG 仍显示 ⚠ | 嵌入模型加载需 30–60 秒 | 等 `/health` 就绪后图标自动变 ●；也可用"综合健康检查"确认 |
+| 双击 .app 提示已在运行 | 单例锁生效（另一实例持有 `logs/.menubar.lock`） | 顶部状态栏找已有图标；确无图标则删锁文件后重启 |
 
 ## 8. 技术债与已知限制（诚实清单）
 

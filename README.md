@@ -148,6 +148,40 @@ bash scripts/uninstall_launchd.sh    # 卸载
 
 `launchd/*.plist` 是模板（含 `@PROJECT_DIR@`、`@PYTHON@` 占位符），安装脚本会自动替换为真实路径并写入 `~/Library/LaunchAgents/`。
 
+### 菜单栏控制台（推荐：图形化启停与诊断）
+
+常驻 macOS 顶部状态栏的小工具，覆盖日常启停/开机自启/卸载与故障分析，无需敲命令：
+
+```bash
+source .venv/bin/activate
+pip install rumps                    # 菜单栏 UI 框架（已收录 requirements.txt）
+bash scripts/build_menubar_app.sh    # 生成 SmartVaultMenuBar.app（ad-hoc 签名）
+open SmartVaultMenuBar.app           # 安装/唤醒 launchd 代理 → 状态栏出现图标
+```
+
+> **双击 `.app` 即同时注册开机自启**（launchd 代理 `com.user.aibrain.menubar`）。
+> 技术注解：经 Finder/`open` 启动的 GUI app 受 macOS TCC 限制、读不了 `~/Documents`，
+> 因此 `.app` 只是一个"确保 launchd 代理运行"的启动器，真正的菜单栏进程由 launchd 拉起
+> （与 ingest/rag 同机制，无权限问题）。
+
+功能一览：
+
+| 菜单项 | 说明 |
+|---|---|
+| 状态图标 `● ◐ ○ ⚠` | 全部运行 / 部分运行 / 全部停止 / 异常（崩溃循环或 RAG 未就绪），每 5 秒自动刷新 |
+| 启动 / 停止 / 重启全部 | 一键 bootstrap/bootout 两个 launchd 服务 |
+| 摄入守护进程 / RAG 服务 子菜单 | 单独启停、重启、卸载（移除开机自启）、Terminal 实时日志 |
+| 🔍 综合健康检查 | config / Vault 路径 / 嵌入模型 / LM Studio 端口 / `/health` `/status` / 进程退出码 逐项 ✔/✘ |
+| ⚠️ 最近错误分析 | 聚合 `logs/*.log` 尾部的 ERROR / Traceback / 启动失败（连续重复自动去重） |
+| 🖥 开机自启：菜单栏控制台 | 控制台自身的登录项开关（安装 `com.user.aibrain.menubar`） |
+| 🧹 卸载全部 SmartVault 服务 | 停止并移除全部三个 launchd 登录项（代码与数据不受影响） |
+
+说明：
+
+- 图标 `⚠` 且 RAG 显示"运行中"：通常是嵌入模型仍在加载，等待 30–60 秒即可
+- 首次点击"实时日志"会请求控制 Terminal 的自动化权限，请点允许
+- 内置单例锁（`logs/.menubar.lock`）防止双开；菜单栏自启项 `KeepAlive=false`，手动退出后不会被强行拉起
+
 ## 三、隐私与安全设计
 
 - 模块 A/B 仅访问 `localhost`（LM Studio）与系统框架；无任何遥测
