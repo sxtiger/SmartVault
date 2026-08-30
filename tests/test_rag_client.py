@@ -73,6 +73,51 @@ class StreamChatTests(unittest.TestCase):
         self.assertEqual(out, "好")
 
 
+class ChatPayloadSamplingTests(unittest.TestCase):
+    """v1.6.2 Qwen3 调优：问答侧默认非 thinking + 官方非 thinking 采样参数。"""
+
+    def _client(self, rag_extra=None, lm_extra=None) -> rag.LMStudioClient:
+        lm = {"base_url": "http://localhost:1234/v1", "chat_model": "qwen3-14b",
+              "temperature": 0.6, "max_tokens": 4096, "timeout_seconds": 5}
+        lm.update(lm_extra or {})
+        return rag.LMStudioClient({"lm_studio": lm, "rag": dict(rag_extra or {})})
+
+    def test_defaults_follow_qwen3_non_thinking_recommendation(self):
+        """无任何 chat_* 覆盖时：temp 0.7 / top_p 0.8 / top_k 20 / thinking 关。"""
+        client = self._client()
+        self.assertAlmostEqual(client.temperature, 0.7)
+        self.assertAlmostEqual(client.top_p, 0.8)
+        self.assertEqual(client.top_k, 20)
+        self.assertFalse(client.thinking)
+
+    def test_chat_payload_appends_no_think_and_sampling(self):
+        """阻塞式 chat：payload 带 top_p/top_k，末条 user 追加 /no_think，原消息不动。"""
+        ok = mock.Mock()
+        ok.json.return_value = {"choices": [{"message": {"content": "答"}}]}
+        client = self._client()
+        msgs = [{"role": "user", "content": "问题"}]
+        with mock.patch.object(rag.requests, "post", return_value=ok) as post:
+            self.assertEqual(client.chat(msgs), "答")
+        body = post.call_args.kwargs["json"]
+        self.assertEqual(body["top_p"], 0.8)
+        self.assertEqual(body["top_k"], 20)
+        self.assertTrue(body["messages"][-1]["content"].endswith("/no_think"))
+        self.assertEqual(msgs[-1]["content"], "问题")
+
+    def test_chat_overrides_and_thinking_enabled(self):
+        """rag.chat_* 覆盖生效；chat_thinking=true 时不追加软开关标记。"""
+        ok = mock.Mock()
+        ok.json.return_value = {"choices": [{"message": {"content": "答"}}]}
+        client = self._client(rag_extra={"chat_temperature": 0.5,
+                                         "chat_top_p": 0.9, "chat_thinking": True})
+        with mock.patch.object(rag.requests, "post", return_value=ok) as post:
+            client.chat([{"role": "user", "content": "问题"}])
+        body = post.call_args.kwargs["json"]
+        self.assertEqual(body["temperature"], 0.5)
+        self.assertEqual(body["top_p"], 0.9)
+        self.assertNotIn("/no_think", body["messages"][-1]["content"])
+
+
 class PruneAiContextTests(unittest.TestCase):
     """prune_ai_context_entries：删除笔记后 ai_context.md 失效归档条目的自动剔除。"""
 

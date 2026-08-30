@@ -8,6 +8,7 @@
 
 | 版本 | 日期 | 变更摘要 | git tag |
 |---|---|---|---|
+| 1.6.2 | 2026-08-30 | 调优（Qwen3 双模式推理参数；取证结论：LM Studio server 端加载参数已最优——32768 ctx / parallel 1 / GPU 满载，真正瓶颈在请求参数层——此前仅发 temperature=0.3，top_p/top_k 落 LM Studio 默认值 1.0/40 属非官方组合，且 Qwen3 thinking 全程开启每请求白烧 200~2000 推理 token；LM Studio /v1 实测不支持 chat_template_kwargs / enable_thinking 请求参数，`/no_think` 软开关是唯一思考控制通道，实测同请求 16.2s→1.25s）：① **采样参数显式下发**——`LLMClient` / `LMStudioClient` 请求体新增 top_p / top_k；归档侧对齐 Qwen3 官方 thinking 模式推荐值 temp 0.6 / top_p 0.95 / top_k 20（`lm_studio.temperature` 0.3→0.6，新增 `lm_studio.top_p / top_k / thinking`）；② **问答侧默认关闭思考**——新增 `apply_thinking_switch()`（末条 user 消息追加 `/no_think`，Qwen3 官方 chat template 据此注入空 think 块；深拷贝不污染原消息，两模块同实现各自内聚）；问答采样取官方非 thinking 推荐值 temp 0.7 / top_p 0.8 / top_k 20（新增 `rag.chat_temperature / chat_top_p / chat_top_k / chat_thinking`，chat_ 前缀避免与检索 top_k 混淆、不回读 lm_studio.temperature）；归档侧默认 thinking=true（质量优先，可配置关）。新增 5 项单测（共 78 项全绿）；E2E 实测：1474 字符草稿归档 15.8s（旧同量级输入 59.6~73.5s）且分类正确、正文逐字保留；RAG 事实问答全链路 5.6s（旧 30s+）答对并正确引用来源、`/no_think` 零泄漏；README LM Studio 调优说明 + 本文档配置表/模块地图/已知问题 7/单测计数同步 | `v1.6.2` |
 | 1.6.1 | 2026-08-30 | 修复（E2E 取证：claude_pro.md 内容与 Obsidian 无关却归入「Obsidian指南」）：① **重归档自愈**——`append_ai_context()` 追加前经 `_drop_stale_ctx_entries()` 按文件名移除旧历史条目：旧条目随 Prompt 注入会形成「历史一致性」锚定（SYSTEM_PROMPT 规则 5 要求与历史索引保持一致），使误归档笔记移回收件箱后仍被 LLM 沿用旧目录、纠错失效（实测两次重归档均跟随旧目录），且 append-only 堆积重复条目；现同 stem 仅保留最新一条，**误归档纠正=移回收件箱即可**（无需再手动删 ai_context 条目）；与 `prune_ai_context_entries`（死链清理）正交互补；② **超短草稿防蹭目录**——SYSTEM_PROMPT 新增规则 8：正文不足约 200 字符的链接收藏/账号信息/碎片备忘须按实际用途与关键实体（站点/工具/邮箱/账号）归类，禁止凭个别词语的弱关联塞入已有目录。新增 3 项单测（`TestAppendAiContext`，共 73 项）；README「分类体系全自动」+ 本文档 How-to/管线时序/模块地图同步 | `v1.6.1` |
 | 1.6.0 | 2026-08-30 | 功能：① **AI 自动分类**——SYSTEM_PROMPT 整理规则强化：目录树无合适目录时 LLM 须依据主题自建简洁一级目录（2~6 字，如「开发环境」「AI 工具」），分类体系随归档自然生长、同主题复用；严禁输出「未分类」「笔记」「文档」「其他」等无信息量目录名——根治空仓库冷启动首篇回退 `fallback_folder` 且后续笔记持续跟随的雪球效应；② **收件箱空目录自动清理**——新增 `prune_empty_dirs()`（归档成功后 + 启动补扫时自底向上清理，含仅含 .DS_Store 的目录；收件箱根与含真实文件的目录永不删），解决迁移场景残留空 `附件/` 目录问题；③ 无附件时不再预创建空 `附件/` 目录（`attach_dir` 条件创建）。README「分类体系全自动」节替换原「冷启动雪球」三步手动法；新增 3 项单测（`TestPruneEmptyDirs`）；E2E：15 篇「未分类」存量笔记移回收件箱自动重归档为 4 个主题目录（开发环境 11/Obsidian指南 2/网络工具 2/安全工具 1），附件随迁、空目录自动清理、历史索引死链自动剔除 | `v1.6.0` |
 | 1.5.4 | 2026-08-30 | 文档：① 新增**旧仓库迁移指南**（README + 本文档第 5 节）——笔记连同 `附件/` 目录整体投入收件箱即可（watchdog 递归监听 + `resolve_attachment` 递归按文件名定位，wikilink 带不带路径均可解析）；两个注意事项：附件目录内 .md 会被误当草稿、归档后空附件目录需手动清理；② 新增**「未分类」冷启动雪球**对策（README + 本文档第 5 节 + Roadmap）——根因：空目录树时首篇易回退 `fallback_folder`，「优先选已有目录」规则使后续笔记持续跟随未分类；对策：建分类目录 + ai_context.md 规则区写分类约定 + 存量笔记拖动归位（mtime 变化自动重索引）；Roadmap 短期新增「冷启动分类引导」优化项 | `v1.5.4` |
@@ -70,7 +71,7 @@
 | 引用解析 | `find_attachment_refs` `resolve_attachment` `rewrite_links` | 提取 `![[x]]` 嵌入与标准 md 附件链接（跳过 URL/锚点/md 笔记）→ 收件箱定位（无扩展名自动补全）→ 附件改名后同步改写正文 |
 | 多模态解析 | `parse_attachment`（按扩展名分发） | png/jpg…→ocrmac(Vision)；音视频→mlx-whisper（自动回退 openai-whisper）；pdf→PyMuPDF；docx/xlsx/pptx→对应库；pages/numbers/key→包内 QuickLook/Preview.pdf |
 | 上下文 | `scan_tree` `load_ai_context` `_drop_stale_ctx_entries` | 目录树（排除隐藏目录/收件箱，限 tree_depth 层）；ai_context 超长时保头尾智能截断；追加历史条目前按文件名移除同 stem 旧条目（重归档自愈，防旧目录经 Prompt 锚定 LLM、防条目重复堆积，仅匹配标准生成行、人工条目保守不动） |
-| LLM | `LLMClient` `SYSTEM_PROMPT` `parse_llm_json` | 优先 `response_format: json_schema` 结构化输出，LM Studio 400 时自动降级（上下文超限除外——识别为独立错误并给出重载指引，不做无谓重发）；鲁棒解析（去围栏/截噪声/tags 类型容错） |
+| LLM | `LLMClient` `SYSTEM_PROMPT` `parse_llm_json` `apply_thinking_switch` | 优先 `response_format: json_schema` 结构化输出，LM Studio 400 时自动降级（上下文超限除外——识别为独立错误并给出重载指引，不做无谓重发）；鲁棒解析（去围栏/截噪声/tags 类型容错）；采样参数显式下发（Qwen3 thinking 模式推荐值），thinking=false 时经 `/no_think` 软开关跳过思考 |
 | 落盘 | `build_final_markdown` `run_pipeline` `unique_path` `prune_empty_dirs` | YAML frontmatter（引号转义）；管线编排；重名追加 ` 2` 序号；归档后/启动补扫时清理收件箱空目录（含仅含 .DS_Store 的，根目录与含真实文件的目录永不删） |
 | 守护 | `VaultState`、watchdog handler、`run_daemon` / `run_check` / `run_scan` / `main` | 双闸防抖（观察窗+静默期+大小稳定）、附件到齐等待、每 Vault 独立队列与工作线程 |
 
@@ -84,7 +85,7 @@ CLI：`--check` 环境自检｜`--scan` 批处理积压｜`--once 文件 --vault
 | 嵌入 | `BGEEmbeddings` | 本地 sentence-transformers 加载 bge-small-zh-v1.5；检索 query 加官方指令前缀；MPS 不可用回退 CPU |
 | 索引 | `VaultIndexer` | Markdown 标题+递归分块；mtime 短路 + md5 兜底的增量 `sync`；`rebuild` 全量重建；`search` 余弦检索；排除 `rag.exclude_folders` |
 | 死链清理 | `prune_ai_context_entries` | `sync()` 开头顺带剔除 ai_context.md 中指向已删除笔记的「历史归档索引」条目（append-only 遗留死链）；无剔除不写盘；人工改写过的非标准条目保守不动；剔除后 mtime 变化即被本轮重新索引（自愈闭环）；`/status` 报 `last_prune` |
-| 生成 | `LMStudioClient` | 阻塞 + SSE 流式两种调用（流式逐行 bytes 显式 UTF-8 解码，防 requests 对无 charset 头按 ISO-8859-1 解码的乱码陷阱）；RAG 提示词拼装 |
+| 生成 | `LMStudioClient` | 阻塞 + SSE 流式两种调用（流式逐行 bytes 显式 UTF-8 解码，防 requests 对无 charset 头按 ISO-8859-1 解码的乱码陷阱）；RAG 提示词拼装；默认非 thinking 采样（Qwen3 官方推荐值）+ `/no_think` 软开关 |
 | API | FastAPI `lifespan`、`/ask` `/health` `/status` `/reindex`、`GET /ui`、`/v1/models` `/v1/chat/completions` | lifespan 启动后台周期 sync 线程；`/ask` 支持 `stream:true`（SSE：sources→message×N→done）；`/ui` 返回 `static/chat.html` 单页聊天界面；`/v1/*` 为 OpenAI 兼容适配层（BMO Chatbot 等插件直连，query=末条 user 消息、历史≤6 轮、来源以 Markdown 附录并入回答） |
 
 持久化：索引状态 `data/index_state.json`（路径→{mtime,md5}）；向量库 `data/chroma/`。
@@ -112,7 +113,8 @@ macOS 状态栏常驻应用（rumps/PyObjC），是 launchd 的图形前端 + �
 |---|---|---|
 | `lm_studio.base_url` | `http://localhost:1234/v1` | LM Studio OpenAI 兼容端点 |
 | `lm_studio.chat_model` | `qwen2.5-7b-instruct` | 必须与 LM Studio 已加载模型的标识**完全一致**（模型页可复制），否则 404 |
-| `lm_studio.temperature / max_tokens / timeout_seconds` | 0.3 / 4096 / 300 | 归档生成参数；长文输入偶发超时可调大 timeout 或减小 limits |
+| `lm_studio.temperature / top_p / top_k / thinking` | 0.6 / 0.95 / 20 / true | 归档侧采样参数，Qwen3 官方 thinking 模式推荐值；thinking=false 时末条 user 消息追加 `/no_think` 软开关跳过思考（大幅提速） |
+| `lm_studio.max_tokens / timeout_seconds` | 4096 / 300 | 归档生成预算与超时；长文输入偶发超时可调大 timeout 或减小 limits |
 | `lm_studio.structured_output` | `true` | json_schema 结构化输出；LM Studio 不支持报 300/400 时代码自动降级为提示词模式 |
 | `inbox_folder_name` | `待处理笔记` | 各 Vault 收件箱目录名（守护进程自动创建） |
 | `context_file` / `ai_context_max_chars` / `tree_depth` | `ai_context.md` / 6000 / 2 | 注入 LLM 的仓库上下文：规则+历史索引文件、截断上限、目录树层数 |
@@ -130,6 +132,7 @@ macOS 状态栏常驻应用（rumps/PyObjC），是 launchd 的图形前端 + �
 | `rag.embedding_model_path` / `embedding_device` | `models/bge-small-zh-v1.5` / `mps` | 相对 config.json 的本地模型目录；device 不可用时自动回退 cpu |
 | `rag.chroma_dir` / `collection_name` | `data/chroma` / `smartvault` | 向量库持久化位置与集合名 |
 | `rag.chunk_size` / `chunk_overlap` / `top_k` | 500 / 80 / 4 | 分块与检索参数；**改动后必须全量 rebuild 才生效** |
+| `rag.chat_temperature` / `chat_top_p` / `chat_top_k` / `chat_thinking` | 0.7 / 0.8 / 20 / false | 问答侧 LLM 采样参数（Qwen3 官方非 thinking 推荐值）；chat_thinking=false 经 `/no_think` 软开关跳过思考（E2E 全链路 5.6s）；chat_ 前缀避免与检索 top_k 混淆，且不回读 lm_studio.temperature |
 | `rag.rescan_seconds` | 300 | 后台增量扫描周期 |
 | `rag.exclude_folders` | `.obsidian` `.trash` `待处理笔记` | 索引排除目录 |
 | `api.host` / `api.port` | `127.0.0.1` / 8788 | 只绑本机；改端口须同步改 launchd plist 并重装 |
@@ -184,7 +187,7 @@ mtime+size 未变 → 直接跳过（O(1)）→ 变了才算 md5 复核 → 确�
 
 ```bash
 # 日常验证（零三方依赖，任何机器可跑）
-python3 -m unittest discover -s tests          # 73 项单测（纯函数 + 客户端解码 + OpenAI 兼容层 + 归档保真性 + ai_context 清理 + 空目录清理 + 重归档自愈）
+python3 -m unittest discover -s tests          # 78 项单测（纯函数 + 客户端解码 + OpenAI 兼容层 + 归档保真性 + ai_context 清理 + 空目录清理 + 重归档自愈 + Qwen3 采样调优）
 python3 -m py_compile ingest_daemon.py rag_api.py scripts/build_index.py
 
 # 联调冒烟
@@ -235,7 +238,7 @@ git tag vX.Y.Z && git push && git push --tags
 4. `run_check` 中用 `(_ for _ in ()).throw(...)` 表达探测失败，可读性一般，可改为普通 try/except
 5. 无 watchdog / LM Studio 真实环境集成测试，单测只覆盖纯函数
 6. 同名附件若在仓库多处存在，只保证目标目录内无冲突（Obsidian wikilink 语义本身如此）
-7. 300s LLM 超时对 14B 模型 + 30k 字符输入偏紧张（实测 14B / 2 万字符草稿归档全程 144s），可调 `timeout_seconds` 或减小 `limits.*`
+7. 300s LLM 超时对 14B 模型 + 30k 字符输入偏紧张（实测 14B / 2 万字符草稿归档全程 144s），可调 `timeout_seconds` 或减小 `limits.*`；v1.6.2 采样对齐官方推荐值后归档明显提速（1474 字符 15.8s），仍紧张可设 `lm_studio.thinking: false` 跳过思考
 
 ## 9. 升级路线（Roadmap，按价值排序）
 
