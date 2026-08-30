@@ -195,8 +195,9 @@ open SmartVaultMenuBar.app           # 安装/唤醒 launchd 代理 → 状态�
 1. **iWork 附件**：`.pages/.numbers/.key` 走 `QuickLook/Preview.pdf`，通常只含首页预览；需要全文请在 iWork 套件中导出 PDF 再拖入。
 2. **同仓库 wikilink 重名**：附件改名仅发生在目标目录已有同名文件时（追加 ` 2` 序号），正文引用会同步改写。
 3. **LM Studio 结构化输出**：优先使用 `response_format: json_schema`；旧版本不支持时自动回退纯提示词 + 鲁棒 JSON 解析（去围栏、截取花括号）。
-4. **首次索引较慢**：几千篇笔记约需几分钟（MPS 嵌入 ~1-2k chunks/秒），之后全部增量。
-5. **失败保护**：单篇草稿处理失败会保留在收件箱原处并记入日志，可用 `--scan` 或 `--once` 重试，绝不会静默丢稿。
+4. **LM Studio 上下文窗口**：归档会把草稿全文 + 仓库上下文整体发给模型（2 万字符草稿 ≈ 1.2 万 tokens），模型需以足够 context length 加载——建议 `lms load <model> -c 32768 --parallel 1`；超限时日志会给出明确指引，而非无效重试。
+5. **首次索引较慢**：几千篇笔记约需几分钟（MPS 嵌入 ~1-2k chunks/秒），之后全部增量。
+6. **失败保护**：单篇草稿处理失败会保留在收件箱原处并记入日志，可用 `--scan` 或 `--once` 重试，绝不会静默丢稿。
 
 ## 五、深入阅读
 
