@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.user.aibrain</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>@PYTHON@</string>
+        <string>@PROJECT_DIR@/ingest_daemon.py</string>
+        <string>--config</string>
+        <string>@PROJECT_DIR@/config.json</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>@PROJECT_DIR@</string>
+
+    <!-- 登录即启动；进程意外退出后 launchd 自动拉起 -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>@PROJECT_DIR@/logs/ingest_daemon.stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>@PROJECT_DIR@/logs/ingest_daemon.stderr.log</string>
+</dict>
+</plist>
