@@ -553,7 +553,9 @@ app.add_middleware(
 
 @app.get("/")
 def root() -> Dict[str, Any]:
-    return {"app": APP_NAME, "endpoints": ["/ui", "/ask", "/health", "/status", "/reindex"],
+    return {"app": APP_NAME,
+            "endpoints": ["/ui", "/ask", "/health", "/status", "/reindex",
+                          "/v1/models", "/v1/chat/completions"],
             "docs": "/docs"}
 
 
@@ -637,6 +639,152 @@ def ask(req: AskRequest):
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"LM Studio 调用失败：{e}")
     return {"answer": answer, "sources": sources}
+
+
+# ================================================================== OpenAI 兼容适配层
+# 供 Obsidian BMO Chatbot 等任意 OpenAI 协议客户端直接查询 SmartVault：
+#   GET  /v1/models           → 模型列表（固定暴露 "smartvault-rag"）
+#   POST /v1/chat/completions → 向量检索 + 生成（支持 stream SSE）
+# 协议要点（对齐 BMO Chatbot 的请求/解析实现）：模型列表读 data[].id；
+# 非流式读 choices[0].message.content；流式读 choices[0].delta.content，
+# 客户端在 finish_reason == "stop" 后不再读取 delta，故结束帧 delta 必须为空。
+OPENAI_COMPAT_MODEL = "smartvault-rag"
+_MAX_HISTORY_TURNS = 6        # 随请求携带的最近对话轮数上限（防上下文膨胀）
+_MAX_HISTORY_CHARS = 2000     # 单条历史消息截断上限
+
+
+def extract_query_and_history(messages: List[Dict[str, Any]]) -> Tuple[str, List[Dict[str, str]]]:
+    """从 OpenAI messages 数组提取检索 query（最后一条用户消息）与其之前的对话历史。
+
+    客户端的 system 消息（如 BMO 的人设设定）被忽略——RAG 场景以
+    RAG_SYSTEM_PROMPT（仅依据笔记上下文回答）为准，避免约束冲突。
+    """
+    last_user_idx = -1
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i].get("role") == "user":
+            last_user_idx = i
+            break
+    if last_user_idx == -1:
+        return "", []
+    content = messages[last_user_idx].get("content")
+    query = (content if isinstance(content, str) else "").strip()
+    history: List[Dict[str, str]] = []
+    for m in messages[:last_user_idx]:
+        role, c = m.get("role"), m.get("content")
+        if role in ("user", "assistant") and isinstance(c, str) and c.strip():
+            history.append({"role": str(role), "content": c[:_MAX_HISTORY_CHARS]})
+    return query, history[-_MAX_HISTORY_TURNS * 2:]
+
+
+def format_sources_footer(sources: List[Dict[str, Any]]) -> str:
+    """把参考来源渲染为 Markdown 附录（OpenAI 协议没有独立 sources 字段）。"""
+    if not sources:
+        return ""
+    lines = "\n".join(f"- {s.get('title') or s.get('path')}（{s.get('path')}）"
+                      for s in sources)
+    return f"\n\n---\n**参考来源**\n{lines}"
+
+
+def _openai_completion(content: str, model: str) -> Dict[str, Any]:
+    """构造标准 chat.completion 非流式响应。"""
+    return {"id": "chatcmpl-smartvault", "object": "chat.completion",
+            "created": int(datetime.now().timestamp()), "model": model,
+            "choices": [{"index": 0,
+                         "message": {"role": "assistant", "content": content},
+                         "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}}
+
+
+def _openai_chunk(model: str, delta: Dict[str, Any],
+                  finish_reason: Optional[str]) -> str:
+    """构造标准 chat.completion.chunk 帧（JSON 字符串，不含 data: 前缀）。"""
+    return json.dumps({
+        "id": "chatcmpl-smartvault", "object": "chat.completion.chunk",
+        "created": int(datetime.now().timestamp()), "model": model,
+        "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
+    }, ensure_ascii=False)
+
+
+def _request_temperature(payload: Dict[str, Any]) -> Optional[float]:
+    t = payload.get("temperature")
+    return float(t) if isinstance(t, (int, float)) else None
+
+
+@app.get("/v1/models")
+def openai_models() -> Dict[str, Any]:
+    """OpenAI 协议模型列表：BMO 等客户端填完 REST API URL 后靠它拉取可选模型。"""
+    return {"object": "list",
+            "data": [{"id": OPENAI_COMPAT_MODEL, "object": "model",
+                      "created": 0, "owned_by": "smartvault"}]}
+
+
+@app.post("/v1/chat/completions")
+def openai_chat_completions(payload: Dict[str, Any]):
+    """OpenAI 兼容入口：最后一条用户消息作为检索 query，其前的对话作为历史上下文。
+
+    stream=true 时返回 chat.completion.chunk SSE 流（data: {...}\\n\\n，以
+    data: [DONE] 结束）；参考来源以 Markdown 附录追加在回答末尾。
+    """
+    messages_in = payload.get("messages") or []
+    query, history = extract_query_and_history(messages_in)
+    if not query:
+        raise HTTPException(status_code=400,
+                            detail="messages 中缺少有效的用户消息（role=user）")
+    requested_model = str(payload.get("model") or OPENAI_COMPAT_MODEL)
+
+    try:
+        idx = get_indexer()
+        chunks = idx.search(query, k=int(_CFG["rag"].get("top_k", 4)))
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"检索失败：{e}")
+
+    if not chunks:
+        empty_answer = "索引为空或未命中任何笔记，请先执行 POST /reindex 建立索引。"
+        if payload.get("stream"):
+            return StreamingResponse(_openai_stream(empty_answer, requested_model),
+                                     media_type="text/event-stream",
+                                     headers={"Cache-Control": "no-cache",
+                                              "X-Accel-Buffering": "no"})
+        return _openai_completion(empty_answer, requested_model)
+
+    sources = unique_sources(chunks)
+    messages = ([{"role": "system", "content": RAG_SYSTEM_PROMPT}] + history +
+                [{"role": "user", "content": build_rag_user_prompt(query, chunks)}])
+    client = LMStudioClient(_CFG)
+    temperature = _request_temperature(payload)
+
+    if payload.get("stream"):
+        def gen() -> Iterator[str]:
+            yield f"data: {_openai_chunk(requested_model, {'role': 'assistant', 'content': ''}, None)}\n\n"
+            try:
+                for delta in client.stream_chat(messages, temperature):
+                    yield f"data: {_openai_chunk(requested_model, {'content': delta}, None)}\n\n"
+                footer = format_sources_footer(sources)
+                if footer:
+                    yield f"data: {_openai_chunk(requested_model, {'content': footer}, None)}\n\n"
+            except Exception as e:  # noqa: BLE001
+                err = f"\n\n**生成失败**：{e}"
+                yield f"data: {_openai_chunk(requested_model, {'content': err}, None)}\n\n"
+            yield f"data: {_openai_chunk(requested_model, {}, 'stop')}\n\n"
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(gen(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache",
+                                          "X-Accel-Buffering": "no"})
+
+    try:
+        answer = client.chat(messages, temperature)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"LM Studio 调用失败：{e}")
+    return _openai_completion(answer + format_sources_footer(sources), requested_model)
+
+
+def _openai_stream(text: str, model: str) -> Iterator[str]:
+    """把既定文本包装成标准 OpenAI SSE 流（空索引兜底使用）。"""
+    yield f"data: {_openai_chunk(model, {'role': 'assistant', 'content': ''}, None)}\n\n"
+    yield f"data: {_openai_chunk(model, {'content': text}, None)}\n\n"
+    yield f"data: {_openai_chunk(model, {}, 'stop')}\n\n"
+    yield "data: [DONE]\n\n"
 
 
 # ================================================================== 入口
