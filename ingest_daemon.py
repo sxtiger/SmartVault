@@ -80,7 +80,7 @@ NOTE_JSON_SCHEMA: Dict[str, Any] = {
     "properties": {
         "target_folder": {"type": "string", "description": "目标目录，相对仓库根，如“一级目录”或“一级目录/二级目录”"},
         "new_filename": {"type": "string", "description": "新文件名，不含 .md 扩展名与路径分隔符"},
-        "summary": {"type": "string", "description": "80~120 字摘要"},
+        "summary": {"type": "string", "description": "80~120 字摘要，必须严格取材于草稿原文，禁止出现原文没有的数字或事实"},
         "tags": {"type": "array", "items": {"type": "string"}, "minItems": 3, "maxItems": 5},
         "optimized_content": {"type": "string", "description": "排版后的完整 Markdown 正文"},
     },
@@ -108,7 +108,7 @@ CONFIG_DEFAULTS: Dict[str, Any] = {
                 "openai_model": "small", "language": "zh"},
     "processing": {"debounce_seconds": 8, "quiet_seconds": 3, "attachment_wait_timeout": 30,
                    "attachments_subfolder": "", "allow_new_folder": True, "max_folder_depth": 2,
-                   "fallback_folder": "未分类"},
+                   "fallback_folder": "未分类", "content_rewrite": False, "rewrite_max_chars": 6000},
     "limits": {"raw_note_max_chars": 30000, "attachment_max_chars": 12000},
     "rag": {"enabled": True, "embedding_model_path": "models/bge-small-zh-v1.5",
             "embedding_device": "mps", "chroma_dir": "data/chroma", "collection_name": "smartvault",
@@ -626,9 +626,9 @@ SYSTEM_PROMPT = """你是「SmartVault 智能仓库」的资深知识管理图�
 2. JSON 字段固定为：
    - "target_folder": 字符串，笔记应归入的目标目录（相对仓库根目录，形如“一级目录”或“一级目录/二级目录”）。
    - "new_filename": 字符串，新文件名（不含 .md 扩展名，不含路径分隔符）。
-   - "summary": 字符串，80~120 字的内容摘要。
+   - "summary": 字符串，80~120 字的内容摘要；摘要中的事实与数字必须严格取材于草稿原文，严禁出现原文没有的数字、比例或结论。
    - "tags": 字符串数组，恰好 3~5 个主题标签，不带 # 号，不含空格。
-   - "optimized_content": 字符串，整理排版后的完整 Markdown 正文。
+   - "optimized_content": 字符串，整理排版后的完整 Markdown 正文；仅当系统未声明“原文保留模式”时才需要填写，声明后必须为空字符串 ""。
 
 【整理规则】
 1. target_folder 必须优先从用户给出的“仓库目录树”中选择已有目录；目录树中确无合适目录时才允许新建，且最多二级深度；严禁使用“待处理笔记”或仓库根目录。
@@ -657,11 +657,12 @@ def build_user_prompt(vault_name: str, draft_name: str, raw_md: str,
         parts.append("【附件解析文本】\n（本篇草稿没有附件）")
     if keep_original_content:
         parts.append(
-            "【本篇为长文保守模式（最高优先级，覆盖前述一切规则）】\n"
-            f"本篇草稿共 {len(raw_md)} 字符，超过自动整理阈值。正文将由系统原样保留草稿原文，"
+            "【本篇为原文保留模式（最高优先级，覆盖前述一切规则）】\n"
+            f"本篇草稿共 {len(raw_md)} 字符，正文将由系统原样保留草稿原文，"
             "你绝对禁止对正文做任何摘要、压缩、改写或重排。因此：\n"
             "- optimized_content 字段必须返回空字符串 \"\"；\n"
-            "- 你只需认真完成 target_folder、new_filename、summary、tags 四个字段。"
+            "- 你只需认真完成 target_folder、new_filename、summary、tags 四个字段，"
+            "其中 summary 也必须严格取材于原文，禁止出现原文没有的数字、比例或事实。"
         )
     parts.append("请依据以上信息，直接输出符合契约的 JSON 对象。")
     return "\n\n".join(parts)
@@ -850,6 +851,25 @@ def _wait_file_stable(path: Path, checks: int = 10, interval: float = 1.0) -> bo
     return last > 0
 
 
+def build_preserved_content(raw_md: str, attach_blocks: List[str]) -> str:
+    """原文保留模式的正文组装：草稿原文逐字保留；附件转录以折叠引用块附加文末。
+
+    附件转录是 OCR/Whisper 的机器产物而非用户原文：必须与原文明确区隔、可折叠、
+    标注「以原附件为准」——既保证转录内容可被 RAG 检索，又避免转录误差污染原文。
+    """
+    if not attach_blocks:
+        return raw_md
+    lines = [raw_md.rstrip("\n"), "",
+             "## 附：附件转录（机器自动生成，仅供检索，若有出入以原附件为准）", ""]
+    for block in attach_blocks:
+        header, _, text = block.partition("\n")
+        lines.append(f"> [!quote]- {header}")
+        body_lines = (text or "（空转录）").splitlines() or ["（空转录）"]
+        lines.extend(f"> {ln}".rstrip() for ln in body_lines)
+        lines.append("")
+    return "\n".join(lines).rstrip("\n") + "\n"
+
+
 # ================================================================== 归档流水线
 def run_pipeline(cfg: Dict[str, Any], client: LLMClient, vault: Vault,
                  md_path: Path) -> Optional[Path]:
@@ -886,13 +906,14 @@ def run_pipeline(cfg: Dict[str, Any], client: LLMClient, vault: Vault,
         attachments.append((ref, p))
         attach_blocks.append(f"◆ 附件「{p.name}」｜{kind}\n{text}")
 
-    # 3) 组装动态上下文（长文保守模式：超过阈值时 LLM 只产元数据，正文原样保留，
-    #    杜绝长文压缩导致的丢内容与幻觉——见 v1.3.1 事故复盘）
+    # 3) 组装动态上下文（原文保留模式：默认所有草稿正文逐字保留，LLM 只产元数据，
+    #    杜绝任何改写导致的丢内容与幻觉——见 v1.3.1 事故复盘；短文 AI 润色为可选开关）
     tree_text = scan_tree(vault.root, depth=int(cfg.get("tree_depth", 2)),
                           exclude_names=frozenset({inbox_name}))
     ctx_text = load_ai_context(vault.context_file, int(cfg["ai_context_max_chars"]))
+    rewrite_enabled = bool(proc.get("content_rewrite", False))   # 默认 False：正文永不改写
     rewrite_max = int(proc.get("rewrite_max_chars", 6000))
-    keep_original = len(raw) > rewrite_max
+    keep_original = (not rewrite_enabled) or len(raw) > rewrite_max
     user_prompt = build_user_prompt(vault.name, md_path.name, raw, attach_blocks,
                                     tree_text, ctx_text,
                                     int(cfg["limits"]["raw_note_max_chars"]),
@@ -904,9 +925,10 @@ def run_pipeline(cfg: Dict[str, Any], client: LLMClient, vault: Vault,
                           json_schema=NOTE_JSON_SCHEMA)
     meta = parse_llm_json(raw_llm, fallback_filename=md_path.stem)
     if keep_original:
-        meta["optimized_content"] = raw  # 长文保守模式：正文一律用原文，无视 LLM 返回
-        LOG.info("长文保守模式（%d 字符 > %d）：正文保留原文，LLM 仅提供元数据",
-                 len(raw), rewrite_max)
+        # 原文保留模式：正文逐字保留草稿原文（附件转录折叠附加于文末），无视 LLM 返回
+        meta["optimized_content"] = build_preserved_content(raw, attach_blocks)
+        LOG.info("原文保留模式（%d 字符，附件转录 %d 份）：正文保留原文，LLM 仅提供元数据",
+                 len(raw), len(attach_blocks))
     else:
         # 短文模式：LLM 万一未返回正文也回退原文，任何情况下不允许内容丢失
         meta["optimized_content"] = meta["optimized_content"].strip() or raw

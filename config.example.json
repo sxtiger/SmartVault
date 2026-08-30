@@ -31,6 +31,7 @@
     "allow_new_folder": true,
     "max_folder_depth": 2,
     "fallback_folder": "未分类",
+    "content_rewrite": false,
     "rewrite_max_chars": 6000
   },
   "limits": {

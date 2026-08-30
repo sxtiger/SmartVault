@@ -45,14 +45,14 @@ class TestBuildUserPromptConservativeMode(unittest.TestCase):
     def test_long_draft_injects_keep_original_directive(self):
         prompt = sv.build_user_prompt("智能笔记", "草稿.md", "x" * 100, [], "", "",
                                       30000, keep_original_content=True)
-        self.assertIn("长文保守模式", prompt)
+        self.assertIn("原文保留模式", prompt)
         self.assertIn("optimized_content", prompt)
         self.assertIn("空字符串", prompt)
 
     def test_short_draft_has_no_keep_original_directive(self):
         prompt = sv.build_user_prompt("智能笔记", "草稿.md", "短文", [], "", "",
                                       30000, keep_original_content=False)
-        self.assertNotIn("长文保守模式", prompt)
+        self.assertNotIn("原文保留模式", prompt)
 
     def test_length_reported_in_directive(self):
         text = "字" * 10000
@@ -122,6 +122,34 @@ class TestBackupDraft(unittest.TestCase):
             self.assertEqual(len(files), 3)
             self.assertTrue(files[-1].endswith("草稿.md"))
             self.assertTrue(files[0].endswith("_old.md"))
+
+
+class TestBuildPreservedContent(unittest.TestCase):
+    """v1.4.0 原文保留模式的正文组装：原文逐字不动，附件转录折叠附加。"""
+
+    def test_no_attachments_returns_raw_verbatim(self):
+        raw = "# 原文\n\n正文一段，含数字 9527。\n"
+        self.assertEqual(sv.build_preserved_content(raw, []), raw)
+
+    def test_attachments_appended_as_folded_quote_blocks(self):
+        raw = "正文内容"
+        blocks = [
+            "◆ 附件「a.png」｜图像 OCR\n第一行\n第二行",
+            "◆ 附件「b.mp3」｜语音转录\n",
+        ]
+        out = sv.build_preserved_content(raw, blocks)
+        self.assertTrue(out.startswith("正文内容"))                    # 原文未被改动
+        self.assertIn("## 附：附件转录", out)                          # 明确区隔标注
+        self.assertIn("以原附件为准", out)
+        self.assertIn("> [!quote]- ◆ 附件「a.png」｜图像 OCR", out)   # 折叠引用块
+        self.assertIn("> 第一行\n> 第二行", out)                       # 逐行引用
+        self.assertIn("（空转录）", out)                               # 空转录占位
+
+    def test_missing_attachment_block_still_appended(self):
+        out = sv.build_preserved_content("x",
+                                         ["◆ 附件「c.pdf」｜未找到\n（该附件未出现在收件箱中）"])
+        self.assertIn("未找到", out)
+        self.assertIn("> （该附件未出现在收件箱中）", out)
 
 
 if __name__ == "__main__":
