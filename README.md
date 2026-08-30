@@ -120,6 +120,7 @@ python rag_api.py        # 启动 http://127.0.0.1:8788，后台自动增量索�
 
 | 接口 | 说明 |
 |---|---|
+| `GET /ui` | **浏览器聊天界面（日常使用推荐入口）**：流式回答 + 来源引用，零依赖离线单页 |
 | `POST /ask` | `{"query": "...", "top_k": 4, "stream": false}` → `{"answer", "sources": [{path, title, distance}]}` |
 | `POST /ask`（流式） | `"stream": true` → SSE：先 `event: sources`，再 `event: message` 增量，最后 `event: done` |
 | `POST /reindex` | `{"rebuild": false}` 增量同步；`{"rebuild": true}` 全量重建 |
