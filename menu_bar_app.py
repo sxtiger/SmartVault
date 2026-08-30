@@ -128,9 +128,15 @@ def _wait(cond: Callable[[], bool], seconds: float = 10.0) -> bool:
 
 
 def svc_start(svc: ServiceSpec) -> Tuple[bool, str]:
-    """安装并启动（bootstrap）；已在运行则先 bootout 再重装（相当于重启）。"""
+    """安装并启动（bootstrap）；已在正常运行则直接返回（幂等，不打断服务）。
+
+    停止 / 崩溃循环 / 刚加载未起进程时：渲染 plist → bootout → 等待拆除
+    → bootstrap×5 重试（复用 v1.0.1 竞态修复）。
+    """
     if not svc.template.exists():
         return False, f"缺少模板：{svc.template}"
+    if svc_state(svc) == "running":
+        return True, "已在运行（未重启；如需应用新配置请用「重启」）"
     try:
         svc.render()
     except Exception as e:
@@ -329,12 +335,16 @@ class SmartVaultBar(rumps.App):
 
     def _start_stop(self, svc: ServiceSpec, stop: bool):
         ok, msg = svc_stop(svc) if stop else svc_start(svc)
+        if not stop and svc is RAG and "已在运行" not in msg:
+            msg += "\n（加载模型约需 10–30 秒，期间图标 ⚠ 属正常）"
         self._notify(("停止" if stop else "启动") + f" {svc.title}", ok, msg)
         self.refresh(force=True)
 
     def _restart(self, svc: ServiceSpec):
         svc_stop(svc)
         ok, msg = svc_start(svc)
+        if svc is RAG:
+            msg += "\n（加载模型约需 10–30 秒，期间图标 ⚠ 属正常）"
         self._notify(f"重启 {svc.title}", ok, msg)
         self.refresh(force=True)
 
@@ -344,10 +354,13 @@ class SmartVaultBar(rumps.App):
         self.refresh(force=True)
 
     def _start_all(self, _):
-        msgs = []
+        msgs, changed = [], False
         for s in (INGEST, RAG):
             ok, msg = svc_start(s)
+            changed = changed or "已在运行" not in msg
             msgs.append(f"{s.title}：{'✔' if ok else '✘'} {msg}")
+        if changed:
+            msgs.append("\n提示：RAG 加载模型约需 10–30 秒，期间图标显示 ⚠/◐ 属正常，就绪后自动变 ●。")
         rumps.alert("启动全部服务", "\n".join(msgs))
         self.refresh(force=True)
 
@@ -366,6 +379,7 @@ class SmartVaultBar(rumps.App):
         for s in (INGEST, RAG):
             ok, msg = svc_start(s)
             msgs.append(f"{s.title}：{'✔' if ok else '✘'} {msg}")
+        msgs.append("\n提示：RAG 加载模型约需 10–30 秒，期间图标显示 ⚠/◐ 属正常，就绪后自动变 ●。")
         rumps.alert("重启全部服务", "\n".join(msgs))
         self.refresh(force=True)
 
@@ -472,6 +486,53 @@ class SmartVaultBar(rumps.App):
     @rumps.timer(5)
     def _tick(self, _):
         self.refresh()
+
+    # ---------------- 启动自诊断：状态项坐标 + 刘海遮挡检测 + 位置持久化 ----------------
+    @rumps.timer(3)
+    def _log_item_geometry(self, _):
+        """启动后轮询状态项屏幕坐标（布局完成后记录）；若被刘海遮挡则告警。
+
+        同时设置 autosaveName，使状态项位置跨重启持久化（launchd 每次重启进程
+        PID 都会变化，ControlCenter 会将其视为全新 ephemeral 项重新布局，容易
+        被排进刘海遮挡区 x 663..848；持久化后位置稳定）。
+        """
+        if getattr(self, "_geom_logged", False):
+            return
+        try:
+            from AppKit import NSScreen
+            from Foundation import NSUserDefaults
+            item = self._nsapp.nsstatusitem
+            if not getattr(self, "_autosave_set", False):
+                self._autosave_set = True
+                item.setAutosaveName_("SmartVaultMenuBarItem")
+            btn = item.button()
+            p = btn.accessibilityAttributeValue_("AXPosition").pointValue()
+            sz = btn.accessibilityAttributeValue_("AXSize").sizeValue()
+            if p.y <= 0:  # 布局未完成（占位坐标 x=0 y=-11），等待下个周期
+                self._geom_tries = getattr(self, "_geom_tries", 0) + 1
+                if self._geom_tries < 10:
+                    return
+                # 30 秒仍未布局：疑似被 macOS 收进溢出隐藏区
+            self._geom_logged = True
+            notch_txt = ""
+            screen = NSScreen.mainScreen()
+            left, right = screen.auxiliaryTopLeftArea(), screen.auxiliaryTopRightArea()
+            if left is not None and right is not None:
+                nl, nr = left.origin.x + left.size.width, right.origin.x
+                if nl < nr:  # 存在刘海遮挡区
+                    notch_txt = f"；刘海区 x {nl:.0f}..{nr:.0f}"
+                    if p.x < nr and p.x + sz.width > nl:
+                        notch_txt += " ⚠ 状态项被刘海遮挡！请按住 ⌘ 键把 ● 拖到时钟左侧可见区域（位置将被记住）"
+            pref = NSUserDefaults.standardUserDefaults().floatForKey_(
+                "NSStatusItem Preferred Position SmartVaultMenuBarItem")
+            note = "" if p.y > 0 else " ⚠ 状态项始终未被布局（可能被收入菜单栏溢出区）"
+            print(f"[SmartVault][诊断] 状态项 x={p.x:.0f} y={p.y:.0f} "
+                  f"宽={sz.width:.0f} 高={sz.height:.0f} title={btn.title()!r}"
+                  f" savedPref={pref:.0f}{notch_txt}{note}",
+                  file=sys.stderr, flush=True)
+        except Exception as exc:  # 诊断失败不影响主功能
+            self._geom_logged = True
+            print(f"[SmartVault][诊断] 状态项位置获取失败: {exc!r}", file=sys.stderr, flush=True)
 
 
 def main() -> None:
