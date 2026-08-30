@@ -68,5 +68,40 @@ class LLMClientChatTests(unittest.TestCase):
         self.assertEqual(post.call_count, 1)
 
 
+class LLMClientSamplingTests(unittest.TestCase):
+    """v1.6.2 Qwen3 调优：采样参数显式下发 + thinking 软开关。"""
+
+    def _client(self, **extra) -> sv.LLMClient:
+        lm = {"base_url": "http://localhost:1234/v1", "chat_model": "qwen3-14b",
+              "temperature": 0.6, "max_tokens": 4096, "timeout_seconds": 5,
+              "structured_output": True}
+        lm.update(extra)
+        return sv.LLMClient({"lm_studio": lm})
+
+    def test_payload_includes_sampling_params(self):
+        """top_p / top_k 必须随请求显式下发，不再依赖 LM Studio 默认值（1.0/40）。"""
+        ok = _resp(200, {"choices": [{"message": {"content": "{}"}}]})
+        client = self._client(top_p=0.95, top_k=20, thinking=True)
+        with mock.patch.object(sv.requests, "post", return_value=ok) as post:
+            client.chat([{"role": "user", "content": "hi"}])
+        body = post.call_args.kwargs["json"]
+        self.assertEqual(body["top_p"], 0.95)
+        self.assertEqual(body["top_k"], 20)
+        self.assertNotIn("/no_think", body["messages"][-1]["content"])
+
+    def test_thinking_off_appends_no_think_marker(self):
+        """thinking=False：最后一条 user 消息末尾追加 /no_think，且原列表不被修改。"""
+        ok = _resp(200, {"choices": [{"message": {"content": "{}"}}]})
+        client = self._client(thinking=False)
+        msgs = [{"role": "system", "content": "sys"},
+                {"role": "user", "content": "正文"}]
+        with mock.patch.object(sv.requests, "post", return_value=ok) as post:
+            client.chat(msgs)
+        sent = post.call_args.kwargs["json"]["messages"]
+        self.assertTrue(sent[-1]["content"].endswith("/no_think"))
+        self.assertEqual(sent[-1]["role"], "user")
+        self.assertEqual(msgs[-1]["content"], "正文")  # 原消息未被原地污染
+
+
 if __name__ == "__main__":
     unittest.main()

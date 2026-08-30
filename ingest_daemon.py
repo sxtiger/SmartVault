@@ -585,6 +585,24 @@ def append_ai_context(vault: Vault, meta: Dict[str, Any], final_md: Path) -> Non
 
 
 # ================================================================== LM Studio 客户端
+def apply_thinking_switch(messages: List[Dict[str, str]], enabled: bool) -> List[Dict[str, str]]:
+    """Qwen3 混合思考模型的软开关：enabled=False 时在最后一条 user 消息末尾追加 /no_think。
+
+    Qwen3 官方 chat template 识别该标记后注入空 <think> 块，模型跳过思考直接作答
+    （实测 qwen3-14b 同请求 16.2s -> 1.25s）。LM Studio 的 /v1 接口不支持
+    chat_template_kwargs / enable_thinking 请求参数（实测均无效），软开关是唯一通道。
+    返回新列表（浅拷贝逐条 dict），不修改调用方传入的消息。
+    """
+    if enabled:
+        return messages
+    out = [dict(m) for m in messages]
+    for m in reversed(out):
+        if m.get("role") == "user":
+            m["content"] = f"{str(m.get('content') or '')}\n\n/no_think"
+            break
+    return out
+
+
 class LLMClient:
     """LM Studio（OpenAI 兼容 /v1）客户端：优先 JSON Schema 结构化输出。"""
 
@@ -592,7 +610,13 @@ class LLMClient:
         lm = cfg["lm_studio"]
         self.base_url = str(lm["base_url"]).rstrip("/")
         self.model = lm["chat_model"]
-        self.temperature = float(lm.get("temperature", 0.3))
+        # 采样参数对齐 Qwen3 官方 thinking 模式推荐值（temp 0.6 / top_p 0.95 /
+        # top_k 20）；此前只发 temperature，top_p/top_k 落到 LM Studio 默认值
+        # （1.0 / 40），属非官方组合。thinking=False 时经 /no_think 软开关跳过思考。
+        self.temperature = float(lm.get("temperature", 0.6))
+        self.top_p = float(lm.get("top_p", 0.95))
+        self.top_k = int(lm.get("top_k", 20))
+        self.thinking = bool(lm.get("thinking", True))
         self.max_tokens = int(lm.get("max_tokens", 4096))
         self.timeout = int(lm.get("timeout_seconds", 300))
         self.structured = bool(lm.get("structured_output", True))
@@ -604,8 +628,10 @@ class LLMClient:
              temperature: Optional[float] = None) -> str:
         payload: Dict[str, Any] = {
             "model": self.model,
-            "messages": messages,
+            "messages": apply_thinking_switch(messages, self.thinking),
             "temperature": self.temperature if temperature is None else temperature,
+            "top_p": self.top_p,
+            "top_k": self.top_k,
             "max_tokens": self.max_tokens,
             "stream": False,
         }

@@ -2,7 +2,10 @@
   "lm_studio": {
     "base_url": "http://localhost:1234/v1",
     "chat_model": "qwen2.5-7b-instruct",
-    "temperature": 0.3,
+    "temperature": 0.6,
+    "top_p": 0.95,
+    "top_k": 20,
+    "thinking": true,
     "max_tokens": 16384,
     "timeout_seconds": 300,
     "structured_output": true
@@ -40,6 +43,10 @@
   },
   "rag": {
     "enabled": true,
+    "chat_temperature": 0.7,
+    "chat_top_p": 0.8,
+    "chat_top_k": 20,
+    "chat_thinking": false,
     "embedding_model_path": "models/bge-small-zh-v1.5",
     "embedding_device": "mps",
     "chroma_dir": "data/chroma",

@@ -53,9 +53,10 @@ pip install -r requirements.txt
 
 ### 3. LM Studio
 
-- 下载并加载对话模型（如 `Qwen2.5-7B-Instruct`，24GB 内存推荐 Q4_K_M 量化）
+- 下载并加载对话模型（如 `Qwen2.5-7B-Instruct`，24GB 内存推荐 Q4_K_M 量化；Qwen3 系混合思考模型同样适用）
 - 开启本地服务器（Developer → Start Server，默认端口 1234）
 - `config.json` 中 `lm_studio.chat_model` 需与已加载模型名一致
+- **Qwen3 推理调优（v1.6.2）**：采样参数由 SmartVault 每次请求显式下发，LM Studio server 端无需设置——归档侧用 thinking 模式官方推荐值（temp 0.6 / top_p 0.95 / top_k 20，`lm_studio.*`），问答侧默认经 `/no_think` 软开关关闭思考并用非 thinking 推荐值（temp 0.7 / top_p 0.8 / top_k 20，`rag.chat_*`，实测全链路 5.6s）；嫌归档慢可把 `lm_studio.thinking` 设为 `false`
 
 ### 4. 本地嵌入模型（一次性联网下载，之后完全离线）
 

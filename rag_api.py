@@ -461,14 +461,38 @@ def get_indexer() -> VaultIndexer:
 
 
 # ================================================================== LM Studio 客户端
+def _apply_thinking_switch(messages: List[Dict[str, str]], enabled: bool) -> List[Dict[str, str]]:
+    """Qwen3 思考软开关（与 ingest_daemon.apply_thinking_switch 同实现，模块自包含不跨依赖）。
+
+    enabled=False 时在最后一条 user 消息末尾追加 /no_think：官方 chat template
+    据此注入空 <think> 块跳过思考，交互问答延迟大幅下降（LM Studio /v1 不支持
+    chat_template_kwargs 等参数，软开关是唯一通道）。返回新列表，不改原消息。
+    """
+    if enabled:
+        return messages
+    out = [dict(m) for m in messages]
+    for m in reversed(out):
+        if m.get("role") == "user":
+            m["content"] = f"{str(m.get('content') or '')}\n\n/no_think"
+            break
+    return out
+
+
 class LMStudioClient:
     """LM Studio（OpenAI 兼容 /v1）客户端，支持阻塞与 SSE 流式两种调用。"""
 
     def __init__(self, cfg: Dict[str, Any]):
         lm = cfg["lm_studio"]
+        rag_cfg = cfg.get("rag", {}) or {}
         self.base_url = str(lm["base_url"]).rstrip("/")
         self.model = lm["chat_model"]
-        self.temperature = float(lm.get("temperature", 0.3))
+        # 问答侧采样默认取 Qwen3 官方非 thinking 模式推荐值（temp 0.7 / top_p 0.8 /
+        # top_k 20）；键带 chat_ 前缀避免与检索 top_k 混淆，且不回读
+        # lm_studio.temperature（归档 thinking 模式与问答非 thinking 模式各用各的）。
+        self.temperature = float(rag_cfg.get("chat_temperature", 0.7))
+        self.top_p = float(rag_cfg.get("chat_top_p", 0.8))
+        self.top_k = int(rag_cfg.get("chat_top_k", 20))
+        self.thinking = bool(rag_cfg.get("chat_thinking", False))
         self.max_tokens = int(lm.get("max_tokens", 4096))
         self.timeout = int(lm.get("timeout_seconds", 300))
 
@@ -476,8 +500,10 @@ class LMStudioClient:
                  temperature: Optional[float]) -> Dict[str, Any]:
         return {
             "model": self.model,
-            "messages": messages,
+            "messages": _apply_thinking_switch(messages, self.thinking),
             "temperature": self.temperature if temperature is None else temperature,
+            "top_p": self.top_p,
+            "top_k": self.top_k,
             "max_tokens": self.max_tokens,
             "stream": stream,
         }
