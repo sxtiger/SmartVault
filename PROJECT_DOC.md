@@ -8,6 +8,7 @@
 
 | 版本 | 日期 | 变更摘要 | git tag |
 |---|---|---|---|
+| 1.1.3 | 2026-08-30 | 修复：长草稿归档报 400「exceeds the available context size」（LM Studio 侧表现为 Channel Error）被误判为 response_format 不支持而无效重发一发注定失败的请求——`LLMClient.chat` 现识别上下文超限错误，直接抛出带操作指引的 RuntimeError（以更大 context length 重载模型或拆分草稿），不误触回退；配套：模型已以 32k 上下文重载（`lms load qwen3-14b -c 32768 --parallel 1`，M4 Pro 24GB 实测可容纳 2 万字符草稿归档，耗时 144s）；新增 3 项单测 `tests/test_llm_client.py` | `v1.1.3` |
 | 1.1.2 | 2026-08-30 | 修复：「最近错误分析」误报历史错误——`recent_errors` 原扫描各日志「尾部 3000 行」，而日志 append-only 从不轮转，v1.0.0 时代 pydantic 崩溃循环的 Traceback 被永久当作"最近错误"展示；改为**字节偏移增量扫描**（状态持久化 `logs/.menubar_err_state.json`：首跑从 EOF 清零历史、新文件全文扫描、截断/轮转自动重读、末尾半行顺延；`consume=False` 供综合健康检查"只看不消费"，不抢走错误菜单的新错误）；新增 8 项单测 `tests/test_recent_errors.py` | `v1.1.2` |
 | 1.1.1 | 2026-08-30 | 修复：① 菜单栏 ● 图标在刘海屏 MacBook 上不可见——状态项被 macOS 26 ControlCenter 以 ephemeral 定位排入刘海遮挡区（本机 x 663..848），launchd 每次重启 PID 变化又使位置不持久；对策：状态项设 `autosaveName`（位置跨重启持久化，⌘ 拖拽后被记住）+ 启动自诊断（AX 坐标与刘海检测写入 `logs/menubar.stderr.log`，被遮挡时告警）；② 「启动」改幂等——已运行则跳过重启（原逻辑对运行中的服务做 bootout→bootstrap 全量重启，RAG 重载模型 ~17s 期间图标 ⚠ 易被误判为故障）；③ 启动/重启弹窗追加「RAG 加载 10–30 秒期间 ⚠/◐ 属正常」提示 | `v1.1.1` |
 | 1.1.0 | 2026-08-30 | 新增菜单栏控制台 `menu_bar_app.py`（rumps）：状态栏图标实时显示服务健康度（●/◐/○/⚠，5 秒轮询）；下拉菜单提供启动/停止/重启/卸载（launchd bootstrap/bootout，含竞态等待）、控制台自身开机自启开关（`com.user.aibrain.menubar`）、综合健康检查、最近错误聚合分析、Terminal 实时日志；`scripts/build_menubar_app.sh` 生成 `SmartVaultMenuBar.app`——因 macOS TCC 限制（GUI app 读不了 ~/Documents），.app 设计为"确保 launchd 代理运行"的启动器（双击即注册开机自启）；单例锁防双开 | `v1.1.0` |
@@ -56,7 +57,7 @@
 | 引用解析 | `find_attachment_refs` `resolve_attachment` `rewrite_links` | 提取 `![[x]]` 嵌入与标准 md 附件链接（跳过 URL/锚点/md 笔记）→ 收件箱定位（无扩展名自动补全）→ 附件改名后同步改写正文 |
 | 多模态解析 | `parse_attachment`（按扩展名分发） | png/jpg…→ocrmac(Vision)；音视频→mlx-whisper（自动回退 openai-whisper）；pdf→PyMuPDF；docx/xlsx/pptx→对应库；pages/numbers/key→包内 QuickLook/Preview.pdf |
 | 上下文 | `scan_tree` `load_ai_context` | 目录树（排除隐藏目录/收件箱，限 tree_depth 层）；ai_context 超长时保头尾智能截断 |
-| LLM | `LLMClient` `SYSTEM_PROMPT` `parse_llm_json` | 优先 `response_format: json_schema` 结构化输出，LM Studio 400 时自动降级；鲁棒解析（去围栏/截噪声/tags 类型容错） |
+| LLM | `LLMClient` `SYSTEM_PROMPT` `parse_llm_json` | 优先 `response_format: json_schema` 结构化输出，LM Studio 400 时自动降级（上下文超限除外——识别为独立错误并给出重载指引，不做无谓重发）；鲁棒解析（去围栏/截噪声/tags 类型容错） |
 | 落盘 | `build_final_markdown` `run_pipeline` `unique_path` | YAML frontmatter（引号转义）；管线编排；重名追加 ` 2` 序号 |
 | 守护 | `VaultState`、watchdog handler、`run_daemon` / `run_check` / `run_scan` / `main` | 双闸防抖（观察窗+静默期+大小稳定）、附件到齐等待、每 Vault 独立队列与工作线程 |
 
@@ -180,6 +181,7 @@ git tag vX.Y.Z && git push && git push --tags
 | `--check` 报 LM Studio 不通 | 服务未启动 / 端口非 1234 | LM Studio → Developer → Start Server |
 | 归档报模型 404 | `chat_model` 与实际加载模型名不符 | 从 LM Studio 模型页复制准确标识 |
 | 结构化输出 400 后速度变慢 | 走了降级路径（提示词模式） | 升级 LM Studio 至支持 `response_format` 的版本 |
+| 归档报 exceeds the available context size / LM Studio 侧 Channel Error | 草稿+仓库上下文超过模型加载时的 context length（归档需容纳 ~12k 输入 + 4k 输出） | 以更大上下文重载模型：`lms load qwen3-14b -c 32768 --parallel 1`；或拆分超长草稿（日志会给出该指引） |
 | 草稿一直不被处理 | 双闸防抖未满足 / 附件未到齐 | 查 `logs/ingest_daemon.log`；用 `--once` 单篇复现 |
 | 归档成功但 Obsidian 未弹出 | `vaults[].name` ≠ Obsidian 仓库名 | 改为完全一致的名称 |
 | OCR 结果乱码 | 语言偏好不匹配 | 调 `vision.language_preference` |
@@ -205,7 +207,7 @@ git tag vX.Y.Z && git push && git push --tags
 4. `run_check` 中用 `(_ for _ in ()).throw(...)` 表达探测失败，可读性一般，可改为普通 try/except
 5. 无 watchdog / LM Studio 真实环境集成测试，单测只覆盖纯函数
 6. 同名附件若在仓库多处存在，只保证目标目录内无冲突（Obsidian wikilink 语义本身如此）
-7. 300s LLM 超时对 7B 模型 + 30k 字符输入偶发紧张，可调 `timeout_seconds` 或减小 `limits.*`
+7. 300s LLM 超时对 14B 模型 + 30k 字符输入偏紧张（实测 14B / 2 万字符草稿归档全程 144s），可调 `timeout_seconds` 或减小 `limits.*`
 
 ## 9. 升级路线（Roadmap，按价值排序）
 

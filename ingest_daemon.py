@@ -583,10 +583,29 @@ class LLMClient:
             }
         url = f"{self.base_url}/chat/completions"
         resp = requests.post(url, json=payload, timeout=self.timeout)
-        if resp.status_code == 400 and "response_format" in payload:
-            LOG.warning("LM Studio 不支持 response_format，回退纯提示词模式")
-            payload.pop("response_format")
-            resp = requests.post(url, json=payload, timeout=self.timeout)
+        if resp.status_code == 400:
+            body = resp.text[:400]
+            try:
+                err = resp.json().get("error")
+                if isinstance(err, dict) and err.get("message"):
+                    body = str(err["message"])
+                elif err:
+                    body = str(err)
+            except Exception:  # noqa: BLE001
+                pass
+            if "exceeds the available context size" in body or (
+                "context" in body.lower() and "tokens" in body.lower()
+            ):
+                # 上下文超限：与 response_format 无关，重发同样失败，直接给出可操作指引
+                raise RuntimeError(
+                    f"输入超过 LM Studio 上下文窗口（模型 {self.model}）：{body[:200]}。"
+                    f"请以更大 context length 重载模型（如 lms load {self.model} -c 32768），"
+                    "或拆分超长草稿；草稿已保留在收件箱。"
+                )
+            if "response_format" in payload:
+                LOG.warning("LM Studio 不支持 response_format，回退纯提示词模式（原因：%s）", body[:120])
+                payload.pop("response_format")
+                resp = requests.post(url, json=payload, timeout=self.timeout)
         resp.raise_for_status()
         data = resp.json()
         return str(data["choices"][0]["message"]["content"] or "")
