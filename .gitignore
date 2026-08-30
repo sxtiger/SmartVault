@@ -1,0 +1,34 @@
+# ===== 敏感 / 个人配置（勿上传；模板见 config.example.json）=====
+config.json
+.env
+.env.*
+*.pem
+*.key
+secrets/
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+
+# ===== 运行时产物（向量库 / 索引状态 / 日志 / 模型权重）=====
+logs/*
+!logs/.gitkeep
+data/*
+!data/.gitkeep
+models/*
+!models/.gitkeep
+
+# ===== macOS / 编辑器 =====
+.DS_Store
+.idea/
+.vscode/
+*.swp
+

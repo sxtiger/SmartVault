@@ -1,0 +1,4 @@
+# 本地嵌入模型目录：请预先下载（一次性联网，之后完全离线）：
+#   pip install "huggingface_hub[cli]"
+#   huggingface-cli download BAAI/bge-small-zh-v1.5 --local-dir models/bge-small-zh-v1.5
+# 下载完成后本目录不再需要任何网络。
