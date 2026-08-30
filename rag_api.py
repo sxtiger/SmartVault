@@ -47,7 +47,7 @@ import requests
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from langchain_chroma import Chroma
@@ -545,8 +545,14 @@ app.add_middleware(
 
 @app.get("/")
 def root() -> Dict[str, Any]:
-    return {"app": APP_NAME, "endpoints": ["/ask", "/health", "/status", "/reindex"],
+    return {"app": APP_NAME, "endpoints": ["/ui", "/ask", "/health", "/status", "/reindex"],
             "docs": "/docs"}
+
+
+@app.get("/ui", include_in_schema=False)
+def ui():
+    """浏览器聊天界面：static/chat.html 单页应用（离线零依赖，SSE 流式问答）。"""
+    return FileResponse(Path(__file__).parent / "static" / "chat.html")
 
 
 @app.get("/health")
