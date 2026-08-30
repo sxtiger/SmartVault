@@ -172,7 +172,7 @@ open SmartVaultMenuBar.app           # 安装/唤醒 launchd 代理 → 状态�
 | 启动 / 停止 / 重启全部 | 一键 bootstrap/bootout 两个 launchd 服务（启动幂等：已在运行不会重启） |
 | 摄入守护进程 / RAG 服务 子菜单 | 单独启停、重启、卸载（移除开机自启）、Terminal 实时日志 |
 | 🔍 综合健康检查 | config / Vault 路径 / 嵌入模型 / LM Studio 端口 / `/health` `/status` / 进程退出码 逐项 ✔/✘ |
-| ⚠️ 最近错误分析 | 聚合 `logs/*.log` 尾部的 ERROR / Traceback / 启动失败（连续重复自动去重） |
+| ⚠️ 最近错误分析 | 增量监测 `logs/*.log` 自上次检查以来新增的 ERROR / Traceback / 启动失败（连续重复自动去重；历史旧错误不重复告警） |
 | 🖥 开机自启：菜单栏控制台 | 控制台自身的登录项开关（安装 `com.user.aibrain.menubar`） |
 | 🧹 卸载全部 SmartVault 服务 | 停止并移除全部三个 launchd 登录项（代码与数据不受影响） |
 

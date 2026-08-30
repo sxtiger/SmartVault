@@ -6,7 +6,7 @@
 - 服务启停 / 重启 / 卸载（launchd 管理：摄入守护进程 + RAG 问答服务）
 - 本控制台自身的“开机自启”开关（com.user.aibrain.menubar 登录项）
 - 综合健康检查（LM Studio / 嵌入模型 / 索引状态 / API 就绪）
-- 最近错误分析（聚合日志尾部的 ERROR / Traceback / 启动失败）
+- 最近错误分析（增量监测各日志新增的 ERROR / Traceback / 启动失败，历史旧错误不重复告警）
 - 在 Terminal.app 实时跟踪日志
 
 启动方式（任选其一）：
@@ -197,18 +197,67 @@ _ERROR_PAT = re.compile(
 )
 
 
-def recent_errors(limit: int = 8) -> List[str]:
-    """聚合各日志尾部 3000 行中的错误行（连续重复自动去重）。"""
+_ERR_STATE_PATH = LOG_DIR / ".menubar_err_state.json"
+
+
+def recent_errors(limit: int = 8, consume: bool = True) -> List[str]:
+    """增量扫描各日志「自上次检查以来新增」的错误行（连续重复自动去重）。
+
+    日志是 append-only 且从不轮转，历史错误（如已修复版本的崩溃循环）会
+    永久留在文件里——扫描“尾部 N 行”会把陈年旧账当作“最近错误”反复展示。
+    改为按字节偏移增量读取（状态持久化到 logs/.menubar_err_state.json）：
+    - 首次运行（无状态文件）：全部从当前 EOF 起算（清零历史）
+    - 新出现的日志文件：从头全量扫描（内容本来就是新的）
+    - 文件被截断/轮转（size < 已记录偏移）：从头重读
+    - 末尾不完整的行（正被写入）：留到下次
+    consume=False 仅查看不更新状态（供综合健康检查调用，不抢走本菜单的新错误）。
+    """
+    try:
+        first_run = not _ERR_STATE_PATH.exists()
+        state: Dict[str, Any] = {}
+        if not first_run:
+            state = json.loads(_ERR_STATE_PATH.read_text(encoding="utf-8"))
+            if not isinstance(state, dict):
+                state = {}
+                first_run = True  # 状态文件损坏：视为首跑清零
+    except Exception:
+        state = {}
+        first_run = True
     hits: List[str] = []
-    logs = sorted(set(LOG_DIR.glob("*.log")) | set(LOG_DIR.glob("*.log.*")))
-    for log in logs:
+    new_state: Dict[str, int] = {}
+    for log in sorted(set(LOG_DIR.glob("*.log")) | set(LOG_DIR.glob("*.log.*"))):
         try:
-            lines = log.read_text(encoding="utf-8", errors="ignore").splitlines()[-3000:]
+            size = log.stat().st_size
         except OSError:
             continue
-        for line in lines:
+        if first_run:
+            offset = size
+        elif isinstance(state.get(log.name), int):
+            offset = state[log.name]
+        else:
+            offset = 0
+        if size < offset:  # 截断/轮转：从头重读
+            offset = 0
+        data = b""
+        if size > offset:
+            try:
+                with log.open("rb") as f:
+                    f.seek(offset)
+                    data = f.read()
+            except OSError:
+                continue
+        if data and not data.endswith(b"\n"):  # 末尾半行留到下次
+            nl = data.rfind(b"\n")
+            data = data[: nl + 1] if nl >= 0 else b""
+        new_state[log.name] = offset + len(data)
+        for line in data.decode("utf-8", errors="ignore").splitlines():
             if _ERROR_PAT.search(line):
                 hits.append(f"[{log.name}] {line.strip()[:180]}")
+    if consume:
+        try:
+            _ERR_STATE_PATH.write_text(json.dumps(new_state), encoding="utf-8")
+        except OSError:
+            pass
     dedup: List[str] = []
     for h in hits:
         tail = h.split("] ", 1)[-1]
@@ -419,10 +468,13 @@ class SmartVaultBar(rumps.App):
     def _show_errors(self, _):
         errs = recent_errors()
         if not errs:
-            rumps.alert("最近错误分析", "✔ 各日志尾部未发现 ERROR / Traceback / 启动失败记录。")
+            rumps.alert("最近错误分析",
+                        "✔ 自上次检查以来无新增 ERROR / Traceback / 启动失败。\n\n"
+                        "（增量监测：历史日志中的旧错误不会重复告警；\n"
+                        "如需回看完整历史，请用「打开日志文件夹」）")
             return
         body = "\n".join(errs) + "\n\n—— 完整上下文请用“实时日志（Terminal）”或“打开日志文件夹”查看。"
-        rumps.Window(title=f"最近错误（{len(errs)} 条，按时间倒序）", message=body,
+        rumps.Window(title=f"新增错误（{len(errs)} 条，旧→新）", message=body,
                      dimensions=(640, 420)).run()
 
     def _full_check(self, _):
@@ -451,8 +503,9 @@ class SmartVaultBar(rumps.App):
         s = http_json("/status")
         if s:
             lines.append(f"ℹ 已索引 {s.get('files_indexed')} 篇笔记 / {s.get('chunks')} 个分块")
-        errs = recent_errors()
-        mark(not errs, "日志尾部无错误" if not errs else f"发现 {len(errs)} 条近期错误（见“最近错误分析”）")
+        errs = recent_errors(consume=False)
+        mark(not errs, "自上次「最近错误分析」以来无新增错误" if not errs
+             else f"发现 {len(errs)} 条新增错误（见“最近错误分析”）")
         rumps.Window(title="SmartVault 综合健康检查", message="\n".join(lines),
                      dimensions=(640, 460)).run()
 
