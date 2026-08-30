@@ -169,7 +169,7 @@ open SmartVaultMenuBar.app           # 安装/唤醒 launchd 代理 → 状态�
 | 菜单项 | 说明 |
 |---|---|
 | 状态图标 `● ◐ ○ ⚠` | 全部运行 / 部分运行 / 全部停止 / 异常（崩溃循环或 RAG 未就绪），每 5 秒自动刷新 |
-| 启动 / 停止 / 重启全部 | 一键 bootstrap/bootout 两个 launchd 服务 |
+| 启动 / 停止 / 重启全部 | 一键 bootstrap/bootout 两个 launchd 服务（启动幂等：已在运行不会重启） |
 | 摄入守护进程 / RAG 服务 子菜单 | 单独启停、重启、卸载（移除开机自启）、Terminal 实时日志 |
 | 🔍 综合健康检查 | config / Vault 路径 / 嵌入模型 / LM Studio 端口 / `/health` `/status` / 进程退出码 逐项 ✔/✘ |
 | ⚠️ 最近错误分析 | 聚合 `logs/*.log` 尾部的 ERROR / Traceback / 启动失败（连续重复自动去重） |
@@ -178,9 +178,10 @@ open SmartVaultMenuBar.app           # 安装/唤醒 launchd 代理 → 状态�
 
 说明：
 
-- 图标 `⚠` 且 RAG 显示"运行中"：通常是嵌入模型仍在加载，等待 30–60 秒即可
+- 图标 `⚠` 且 RAG 显示"运行中"：通常是嵌入模型仍在加载（点击"启动/重启"后 10–30 秒内出现属正常），等待片刻即可
 - 首次点击"实时日志"会请求控制 Terminal 的自动化权限，请点允许
 - 内置单例锁（`logs/.menubar.lock`）防止双开；菜单栏自启项 `KeepAlive=false`，手动退出后不会被强行拉起
+- **刘海屏 MacBook 看不到 `●`**：图标可能被系统排入刘海遮挡区（存在但不可见）。⌘ 拖动图标到时钟左侧可固定位置；或重启菜单栏控制台（`launchctl kickstart -k gui/$(id -u)/com.user.aibrain.menubar`）触发重新布局。诊断信息见 `logs/menubar.stderr.log` 的 `[SmartVault][诊断]` 行
 
 ## 三、隐私与安全设计
 
