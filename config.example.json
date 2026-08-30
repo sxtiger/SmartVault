@@ -27,7 +27,7 @@
     "debounce_seconds": 8,
     "quiet_seconds": 3,
     "attachment_wait_timeout": 30,
-    "attachments_subfolder": "",
+    "attachments_subfolder": "附件",
     "allow_new_folder": true,
     "max_folder_depth": 2,
     "fallback_folder": "未分类",

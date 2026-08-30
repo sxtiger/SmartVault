@@ -186,6 +186,62 @@ def strip_frontmatter(text: str) -> Tuple[Dict[str, str], str]:
     return meta, text[m.end():]
 
 
+# ================================================================== ai_context 清理
+_CTX_HEAD_RE = re.compile(r"^## .+$", re.M)
+_CTX_LINK_RE = re.compile(r"^- 文件：\[\[([^\]#|]+?)(?:\|[^\]]*)?\]\]\s*$", re.M)
+_CTX_ENTRY_MARK = "SmartVault 归档"
+
+
+def prune_ai_context_entries(cfg: Dict[str, Any]) -> Dict[str, int]:
+    """清理各 Vault ai_context.md 中指向已删除笔记的「历史归档索引」条目。
+
+    背景：归档索引条目为 append-only，笔记被删除后条目残留为死链
+    （Obsidian 中显示为“未创建”链接）。本函数在索引同步时顺带剔除；
+    返回 {vault名: 剔除条目数}；无失效条目时不写盘（mtime 不变）。
+    """
+    result: Dict[str, int] = {}
+    ctx_name = str(cfg.get("context_file", "ai_context.md") or "ai_context.md")
+    for item in cfg.get("vaults", []):
+        root = Path(str(item["path"])).expanduser()
+        if not root.is_dir():
+            continue
+        name = str(item.get("name") or root.name)
+        ctx = root / ctx_name
+        if not ctx.is_file():
+            continue
+        try:
+            text = ctx.read_text(encoding="utf-8")
+        except OSError:
+            LOG.warning("ai_context 读取失败，跳过清理：%s", ctx)
+            continue
+        heads = list(_CTX_HEAD_RE.finditer(text))
+        dead: List[Tuple[int, int]] = []
+        for i, h in enumerate(heads):
+            if _CTX_ENTRY_MARK not in h.group(0):
+                continue  # 「AI 处理规则」「历史归档索引」等固定标题不是条目
+            seg_start, seg_end = h.start(), (heads[i + 1].start() if i + 1 < len(heads) else len(text))
+            m = _CTX_LINK_RE.search(text[seg_start:seg_end])
+            if not m:
+                continue  # 非标准条目（人工改写过），保守不动
+            link = m.group(1).strip().strip("/")
+            cand = link if link.lower().endswith(".md") else f"{link}.md"
+            if (root / cand).exists():
+                continue
+            dead.append((seg_start, seg_end))
+        if not dead:
+            continue
+        for start, end in reversed(dead):  # 从后往前删，避免坐标位移
+            text = text[:start] + text[end:]
+        try:
+            ctx.write_text(text, encoding="utf-8")
+        except OSError:
+            LOG.exception("ai_context 清理写入失败：%s", ctx)
+            continue
+        result[name] = len(dead)
+        LOG.info("ai_context 清理：%s 剔除 %d 条失效归档条目", name, len(dead))
+    return result
+
+
 # ================================================================== 索引器
 class VaultIndexer:
     """递归索引所有 Vault 的 .md 文件 -> Markdown 分块 -> 本地嵌入 -> ChromaDB。"""
@@ -201,6 +257,7 @@ class VaultIndexer:
         self.lock = threading.RLock()
         self.syncing = False
         self.last_sync: Optional[str] = None
+        self.last_prune: Optional[str] = None  # 最近一次 ai_context 死链清理时间
 
         chroma_dir = Path(self.rag["chroma_dir_abs"])
         chroma_dir.mkdir(parents=True, exist_ok=True)
@@ -294,6 +351,15 @@ class VaultIndexer:
                 return stats
             self.syncing = True
         try:
+            # 顺带清理 ai_context.md 中已删笔记的死链条目（失败不影响索引同步；
+            # 若发生剔除，ai_context.md mtime 变化会在本轮扫描中被重新索引）
+            try:
+                pruned = prune_ai_context_entries(self.cfg)
+                if pruned:
+                    stats["ctx_pruned"] = sum(pruned.values())
+                    self.last_prune = datetime.now().isoformat(timespec="seconds")
+            except Exception:  # noqa: BLE001
+                LOG.exception("ai_context 死链清理失败（不影响索引同步）")
             files = self.iter_md_files()
             stats["scanned"] = len(files)
             current_keys = {k for k, _ in files}
@@ -584,7 +650,7 @@ def status() -> Dict[str, Any]:
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"索引器未就绪：{e}")
     return {"files_indexed": len(idx.state), "chunks": idx.count(),
-            "last_sync": idx.last_sync, "syncing": idx.syncing,
+            "last_sync": idx.last_sync, "last_prune": idx.last_prune, "syncing": idx.syncing,
             "embedding_model": idx.rag["embedding_model_path_abs"],
             "lm_studio_model": _CFG["lm_studio"]["chat_model"]}
 
