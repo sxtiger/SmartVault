@@ -8,6 +8,7 @@
 
 | 版本 | 日期 | 变更摘要 | git tag |
 |---|---|---|---|
+| 1.3.0 | 2026-08-30 | 新增：**OpenAI 兼容适配层** `GET /v1/models` + `POST /v1/chat/completions`（非流式 + `chat.completion.chunk` SSE 流式）——BMO Chatbot 等 Obsidian 插件填 REST API URL `http://127.0.0.1:8788/v1` 即可直连 SmartVault RAG；末条 user 消息作检索 query、携带最近 6 轮历史、客户端 system 人设被忽略（以 RAG 接地约束为准）、参考来源以 Markdown 附录追加在回答末尾；协议契约对齐 BMO 源码（模型列表 `data[].id`、流式 `delta.content` + `finish_reason=="stop"` 停止帧 + `data: [DONE]`）；新增 14 项单测 `tests/test_openai_compat.py`（含 BMO 解析逻辑 Python 复刻回归） | `v1.3.0` |
 | 1.2.1 | 2026-08-30 | 修复：聊天界面流式回答中文乱码（ç¬è®° 式 mojibake）——LM Studio 的 `text/event-stream` 响应头不带 charset，requests 按 RFC 默认 ISO-8859-1 解码（`iter_lines(decode_unicode=True)`），UTF-8 中文增量全部变乱码（阻塞模式走 `resp.json()` 有编码探测故正常）；改为逐行取原始 bytes 显式 UTF-8 解码；新增 2 项单测 `tests/test_rag_client.py` | `v1.2.1` |
 | 1.2.0 | 2026-08-30 | 新增：**浏览器知识问答界面** `GET /ui`（`static/chat.html` 单页应用，零 CDN 依赖遵守离线隐私承诺）——SSE 流式逐字渲染回答、来源引用 chips（标题+路径+余弦距离）、`/status` 健康角标轮询；此前问答 API 仅能通过 curl / `/docs` 调试台 / 自写脚本调用 | `v1.2.0` |
 | 1.1.3 | 2026-08-30 | 修复：长草稿归档报 400「exceeds the available context size」（LM Studio 侧表现为 Channel Error）被误判为 response_format 不支持而无效重发一发注定失败的请求——`LLMClient.chat` 现识别上下文超限错误，直接抛出带操作指引的 RuntimeError（以更大 context length 重载模型或拆分草稿），不误触回退；配套：模型已以 32k 上下文重载（`lms load qwen3-14b -c 32768 --parallel 1`，M4 Pro 24GB 实测可容纳 2 万字符草稿归档，耗时 144s）；新增 3 项单测 `tests/test_llm_client.py` | `v1.1.3` |
@@ -33,6 +34,7 @@
          │           │  ┌─ rag_api.py（模块 B，:8788）────┐      ┌ bge-small-zh(MPS)┐ │
          └───────────┼─▶│ 后台增量索引(mtime+md5)           ├─────▶│ + ChromaDB 持久化 │ │
                      │  │ POST /ask 检索→RAG 生成→sources  │      └─────────────────┘ │
+                      │  │ /v1/chat/completions(OpenAI 兼容)│◀─ BMO Chatbot 等 Obsidian 插件│
                      │  └──────────────────────────────────┘                            │
                      └────────────────────────────────────────────────────────────────┘
 ```
@@ -65,7 +67,7 @@
 
 CLI：`--check` 环境自检｜`--scan` 批处理积压｜`--once 文件 --vault 名称` 单篇调试｜无参前台常驻。
 
-### 2.2 rag_api.py（单文件约 650 行）
+### 2.2 rag_api.py（单文件约 810 行）
 
 | 层 | 关键符号 | 职责 / 修改入口 |
 |---|---|---|
@@ -73,7 +75,7 @@ CLI：`--check` 环境自检｜`--scan` 批处理积压｜`--once 文件 --vault
 | 嵌入 | `BGEEmbeddings` | 本地 sentence-transformers 加载 bge-small-zh-v1.5；检索 query 加官方指令前缀；MPS 不可用回退 CPU |
 | 索引 | `VaultIndexer` | Markdown 标题+递归分块；mtime 短路 + md5 兜底的增量 `sync`；`rebuild` 全量重建；`search` 余弦检索；排除 `rag.exclude_folders` |
 | 生成 | `LMStudioClient` | 阻塞 + SSE 流式两种调用（流式逐行 bytes 显式 UTF-8 解码，防 requests 对无 charset 头按 ISO-8859-1 解码的乱码陷阱）；RAG 提示词拼装 |
-| API | FastAPI `lifespan`、`/ask` `/health` `/status` `/reindex`、`GET /ui` | lifespan 启动后台周期 sync 线程；`/ask` 支持 `stream:true`（SSE：sources→message×N→done）；`/ui` 返回 `static/chat.html` 单页聊天界面 |
+| API | FastAPI `lifespan`、`/ask` `/health` `/status` `/reindex`、`GET /ui`、`/v1/models` `/v1/chat/completions` | lifespan 启动后台周期 sync 线程；`/ask` 支持 `stream:true`（SSE：sources→message×N→done）；`/ui` 返回 `static/chat.html` 单页聊天界面；`/v1/*` 为 OpenAI 兼容适配层（BMO Chatbot 等插件直连，query=末条 user 消息、历史≤6 轮、来源以 Markdown 附录并入回答） |
 
 持久化：索引状态 `data/index_state.json`（路径→{mtime,md5}）；向量库 `data/chroma/`。
 
@@ -159,7 +161,7 @@ mtime+size 未变 → 直接跳过（O(1)）→ 变了才算 md5 复核 → 确�
 
 ```bash
 # 日常验证（零三方依赖，任何机器可跑）
-python3 -m unittest discover -s tests          # 22 项纯函数单测
+python3 -m unittest discover -s tests          # 49 项单测（纯函数 + 客户端解码 + OpenAI 兼容层）
 python3 -m py_compile ingest_daemon.py rag_api.py scripts/build_index.py
 
 # 联调冒烟

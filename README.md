@@ -6,7 +6,7 @@ macOS（Apple Silicon）上 100% 本地运行的 Obsidian AI 知识管理系统�
 | 模块 | 文件 | 职责 |
 |---|---|---|
 | A. 摄入与归档守护进程 | `ingest_daemon.py` | watchdog 监听多 Vault 的「待处理笔记」收件箱，多模态解析附件，LLM 提炼为 Strict JSON，自动归类落盘并唤醒 Obsidian |
-| B. 对话式知识查询服务 | `rag_api.py` | FastAPI 本地 RAG：中文嵌入 + ChromaDB 向量检索 + LM Studio 生成；自带浏览器聊天界面（`GET /ui`），`POST /ask` 返回带引用来源的回答（支持 SSE 流式） |
+| B. 对话式知识查询服务 | `rag_api.py` | FastAPI 本地 RAG：中文嵌入 + ChromaDB 向量检索 + LM Studio 生成；自带浏览器聊天界面（`GET /ui`），`POST /ask` 返回带引用来源的回答（支持 SSE 流式）；另暴露 OpenAI 兼容 `/v1/chat/completions`，可接 BMO Chatbot 等 Obsidian 插件 |
 
 ```
 SmartVault/
@@ -26,7 +26,7 @@ SmartVault/
 │   ├── uninstall_launchd.sh         # 一键卸载
 │   ├── start_all.sh                 # 前台手动联调（Ctrl+C 一起退出）
 │   └── build_index.py               # 手动索引维护（增量 / 全量重建）
-├── tests/                           # 单元测试：纯函数 / 最近错误扫描 / LLM 客户端 / RAG 流式解码
+├── tests/                           # 单元测试：纯函数 / 最近错误扫描 / LLM 客户端 / RAG 流式解码 / OpenAI 兼容层
 ├── models/                          # 本地嵌入模型（bge-small-zh-v1.5，手动下载）
 ├── data/                            # ChromaDB 持久化 + 索引状态
 └── logs/                            # 运行日志（自动轮转）
@@ -132,6 +132,8 @@ python rag_api.py        # 前台手动启动 http://127.0.0.1:8788，后台自�
 | `GET /ui` | **浏览器聊天界面（日常使用推荐入口）**：流式回答 + 来源引用，零依赖离线单页 |
 | `POST /ask` | `{"query": "...", "top_k": 4, "stream": false}` → `{"answer", "sources": [{path, title, distance}]}` |
 | `POST /ask`（流式） | `"stream": true` → SSE：先 `event: sources`，再 `event: message` 增量，最后 `event: done` |
+| `GET /v1/models` | OpenAI 兼容模型列表（固定暴露 `smartvault-rag`） |
+| `POST /v1/chat/completions` | **OpenAI 兼容入口**：标准 `messages` 格式（支持 `stream` SSE 流式），供 BMO Chatbot 等任意 OpenAI 协议客户端直连 |
 | `POST /reindex` | `{"rebuild": false}` 增量同步；`{"rebuild": true}` 全量重建 |
 | `GET /status` | 索引文件数 / 分块数 / 最近同步时间 |
 | `GET /health` | LM Studio 与嵌入模型健康状态 |
@@ -146,6 +148,20 @@ const res = await fetch("http://127.0.0.1:8788/ask", {
 });
 const { answer, sources } = await res.json();
 ```
+
+#### 在 Obsidian BMO Chatbot 插件中接入（OpenAI 兼容）
+
+服务自带 OpenAI 兼容适配层，BMO Chatbot 无需任何改造即可直连。插件设置 → **REST API Connection**：
+
+| 设置项 | 填写值 |
+|---|---|
+| **API Key** | 留空（本地服务不鉴权） |
+| **REST API URL** | `http://127.0.0.1:8788/v1` |
+| **Enable Stream** | 建议开启（流式逐字输出） |
+
+填完 URL 后插件会自动拉取模型列表，在聊天窗顶部的模型下拉框选择 **smartvault-rag**（REST API Models 分组）即可开始提问。
+
+行为说明：每条提问都会先对你的全部笔记做向量检索，再带着命中片段生成，回答末尾自动附「参考来源」笔记路径；多轮对话携带最近 6 轮历史；BMO 的人设 system 提示词在 RAG 模式下被忽略（以「仅依据笔记上下文回答」约束为准）。也可改填 LM Studio 直连地址 `http://localhost:1234/v1`，但那样**没有笔记检索**，模型看不到库内容。
 
 ### 开机自启（launchd）
 
