@@ -152,5 +152,43 @@ class TestBuildPreservedContent(unittest.TestCase):
         self.assertIn("> （该附件未出现在收件箱中）", out)
 
 
+class TestPruneEmptyDirs(unittest.TestCase):
+    """v1.6.0 收件箱空目录自动清理：归档移走附件后残留的空 附件/ 等目录应被删除。"""
+
+    def _mk(self, d: str):
+        inbox = Path(d)
+        (inbox / "附件").mkdir()
+        (inbox / "附件" / ".DS_Store").write_text("", encoding="utf-8")
+        (inbox / "子" / "深层").mkdir(parents=True)          # 空的多层目录
+        (inbox / "keep").mkdir()
+        (inbox / "keep" / "草稿.md").write_text("x", encoding="utf-8")  # 占用目录不删
+        return inbox
+
+    def test_removes_empty_and_dsstore_dirs_keeps_occupied(self):
+        with tempfile.TemporaryDirectory() as d:
+            inbox = self._mk(d)
+            removed = sv.prune_empty_dirs(inbox)
+            self.assertFalse((inbox / "附件").exists())       # 只含 .DS_Store → 删
+            self.assertFalse((inbox / "子").exists())         # 空子目录 → 级联删
+            self.assertTrue((inbox / "keep").exists())        # 含草稿 → 保留
+            self.assertTrue(inbox.exists())                   # 收件箱根 → 永不删
+            self.assertEqual(removed, 3)
+
+    def test_hidden_file_blocks_removal(self):
+        with tempfile.TemporaryDirectory() as d:
+            inbox = Path(d)
+            (inbox / "配置").mkdir()
+            (inbox / "配置" / ".gitkeep").write_text("", encoding="utf-8")
+            self.assertEqual(sv.prune_empty_dirs(inbox), 0)
+            self.assertTrue((inbox / "配置").exists())        # 非 .DS_Store 隐藏文件 → 保留
+
+    def test_no_dirs_noop(self):
+        with tempfile.TemporaryDirectory() as d:
+            inbox = Path(d)
+            (inbox / "a.md").write_text("x", encoding="utf-8")
+            self.assertEqual(sv.prune_empty_dirs(inbox), 0)
+            self.assertTrue((inbox / "a.md").exists())
+
+
 if __name__ == "__main__":
     unittest.main()
