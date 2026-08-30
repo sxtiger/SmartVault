@@ -8,6 +8,7 @@
 
 | 版本 | 日期 | 变更摘要 | git tag |
 |---|---|---|---|
+| 1.5.1 | 2026-08-30 | 文档：① README 新增「多仓库与索引清理」节 + 本文档 4.2/5 节补充——明确多 Vault 共用同一向量集合、按 `仓库名/相对路径` 键隔离的架构事实；🧹 按文件粒度对其他仓库零影响 / ♻️ 全局清空重建的影响边界；清空/弃用仓库的标准流程（先注销 config → 删文件夹 → 重启守护进程 → 点 🧹，顺序反了会持续产生「Vault 目录不存在」错误日志）；「注销即清理」技巧（config 移除条目+重启即自动移除该仓库全部向量）；② 新增 `CLAUDE.md` AI 协作规则——确立**文档同步铁律**（任何功能/行为/配置/修复变更，提交前必须同轮更新 PROJECT_DOC 第 0 节版本表+受影响小节与 README，文档不同步视为变更未完成，无需用户提醒）及提交/测试/服务重启/E2E 验证/数据安全红线约定；第 6 节发布 checklist 同步强化，单测计数修正为 67 | `v1.5.1` |
 | 1.5.0 | 2026-08-30 | 新增：① **附件统一收纳**——`processing.attachments_subfolder` 默认值改为 `附件`（原空=与笔记同目录），归档附件进入归类目录下 `附件/` 子目录（wikilink 全局按名解析无需改写，重名改写/标准 md 链接子目录前缀逻辑不变）；② **菜单栏 RAG 维护按钮**——「🧹 清理已删笔记残留（同步索引）」触发 `/reindex` 增量同步、「♻️ 重建 RAG 索引（清空后重建）」带确认弹窗触发全量重建（清空测试库后一键归零索引），配套 `http_post_json`；③ **删除笔记的残留清理**——新增 `prune_ai_context_entries`：`sync()` 每轮（后台周期 + 手动触发）顺带剔除 ai_context.md 中指向已删除笔记的失效归档条目，剔除后 ai_context.md mtime 变化即被本轮重新索引（自愈闭环）；`/status` 新增 `last_prune` 字段。新增 4 项单测 `tests/test_rag_client.py`；E2E 实测：带附件草稿归档后附件落位 `房产证办理/附件/`、删除笔记后增量同步剔除 ai_context 死链条目 | `v1.5.0` |
 | 1.4.0 | 2026-08-30 | 行为变更：**原文保留模式成为默认**——用户核心诉求「原文不可被 AI 改变」从长文扩展到全部草稿：新增 `processing.content_rewrite`（默认 false），关闭时所有草稿正文逐字保留、LLM 仅产元数据（目录/文件名/摘要/标签）；开启后仅 `rewrite_max_chars` 阈值内短文允许 AI 整理，超阈值仍保留原文。修复保守模式丢附件转录：新增 `build_preserved_content`，把 OCR/Whisper 转录以「## 附：附件转录（机器自动生成…以原附件为准）」折叠引用块附加文末（v1.3.1 原实现正文=原文导致转录不可检索）。summary 幻觉防线：SYSTEM_PROMPT / NOTE_JSON_SCHEMA / 保留模式指令三处强制摘要严格取材原文、禁止出现原文没有的数字。新增 3 项单测（`build_preserved_content`）；实测短草稿默认走保留模式、正文逐字一致 | `v1.4.0` |
 | 1.3.1 | 2026-08-30 | 修复：**长草稿归档内容失真**——19941 字符面试准备笔记被 LLM「整理」后仅剩 2702 字节（94% 内容丢失），且编造「准确率提升 17%」「接口覆盖率 75%」等原文不存在的数字。根因四连：① 归档设计为 LLM 重写而非原文保留，「保留关键事实」给了模型自由压缩裁量权；② `max_tokens:4096` 输出预算物理上装不下长文，「禁止遗漏要点」不可能执行；③ 压缩任务+「善用表格代码块」排版诱导触发补全式幻觉；④ 归档成功即删草稿且无备份，损失不可逆。修复：**长文保守模式**（超 `processing.rewrite_max_chars`(默认6000) 字符的草稿，LLM 仅生成元数据，正文原样保留原文）；prompt 加忠实性硬约束（数字/事实必须逐字来自原文、对话体保持原结构、禁缩写扩写）；短文模式 LLM 未返回正文也回退原文（内容永不丢失）；`max_tokens` 提至 16384；归档前自动备份草稿至 `.smartvault/backup/`（保留 100 份，RAG 已排除该目录）；`choose_target_dir` 剥离 LLM 误带的仓库名前缀（修复三级路径误回退未分类）。新增 11 项单测 `tests/test_ingest_fidelity.py`；已实测长文归档正文 43168 字节完整保留、幻觉数字 0 次出现 | `v1.3.1` |
@@ -145,7 +146,9 @@ macOS 状态栏常驻应用（rumps/PyObjC），是 launchd 的图形前端 + �
 8. `ai_context.md` 追加一行历史索引 → `obsidian://open?vault=…&file=…` 唤醒
 
 ### 4.2 增量索引（`VaultIndexer.sync`，模块 B 后台线程）
-mtime+size 未变 → 直接跳过（O(1)）→ 变了才算 md5 复核 → 确实变化则重新分块并按文档 ID 先删后插 → 文件已删除则同步删向量。`rebuild()` 清空 collection 全量重建。
+mtime+size 未变 → 直接跳过（O(1)）→ 变了才算 md5 复核 → 确实变化则重新分块并按文档 ID 先删后插 → 文件已删除则同步删向量 + `prune_ai_context_entries` 剔除 ai_context.md 死链条目。`rebuild()` 清空 collection 全量重建（**全局操作**：所有 Vault 的向量一并清空后重嵌）。
+
+多仓库隔离事实：所有 Vault 共用同一 collection（`data/chroma/`，位于项目目录而非任何仓库内），索引键 `仓库名/相对路径` 隔离——增量 sync 按文件粒度互不影响；rebuild 波及全部仓库；注销某 Vault（config 移除条目 + 重启守护进程）后其全部向量在下一轮 sync 自动移除（「注销即清理」，无需 rebuild）。
 
 ### 4.3 `/ask` 请求生命周期
 查询加 bge 指令前缀 → 嵌入 → Top-K 余弦检索（按来源路径去重）→ 拼 RAG 提示词（上下文+问题+引用要求）→ LM Studio 生成。SSE 模式事件序：`sources`（先推引用）→ `message`×N（正文增量）→ `done`。
@@ -162,13 +165,14 @@ mtime+size 未变 → 直接跳过（O(1)）→ 变了才算 md5 复核 → 确�
 | 新增 Vault | `config.vaults` 追加 → `launchctl kickstart -k gui/$(id -u)/com.user.aibrain` 重启守护进程 |
 | 改 API 端口 | `api.port` + `launchd/com.user.aibrain.rag.plist` 里的 8788 → 重跑 `scripts/install_launchd.sh` |
 | 新增排除目录（不索引） | `rag.exclude_folders` 追加 → 下轮 sync 自动剔除（或手动 rebuild） |
-| 删除笔记 / 清空测试目录后的清理 | 向量块：后台每 300s 增量 sync 自动移除，或菜单栏「🧹 清理已删笔记残留」立即触发；ai_context.md 死链条目同轮被剔除；彻底归零索引（如清空整个测试库）用菜单栏「♻️ 重建 RAG 索引」 |
+| 删除笔记 / 清空测试目录后的清理 | 向量块：后台每 300s 增量 sync 自动移除，或菜单栏「🧹 清理已删笔记残留」立即触发；ai_context.md 死链条目同轮被剔除；彻底归零索引（如清空整个测试库）用菜单栏「♻️ 重建 RAG 索引」（全局操作，所有 Vault 一并重建） |
+| 注销一个 Vault（弃用仓库） | **先**从 `config.vaults` 移除条目 → 删除仓库文件夹 → 重启摄入守护进程 → 点「🧹 清理已删笔记残留」（该仓库全部向量自动移除，无需 rebuild）。顺序不能反：只删文件夹不注销，守护进程每次启动都会记「Vault 目录不存在」ERROR（不会重建目录、不影响其他仓库，但污染「最近错误分析」）。多仓库清理影响详见 README「多仓库与索引清理」 |
 
 ## 6. 测试与发布流程
 
 ```bash
 # 日常验证（零三方依赖，任何机器可跑）
-python3 -m unittest discover -s tests          # 63 项单测（纯函数 + 客户端解码 + OpenAI 兼容层 + 归档保真性）
+python3 -m unittest discover -s tests          # 67 项单测（纯函数 + 客户端解码 + OpenAI 兼容层 + 归档保真性 + ai_context 清理）
 python3 -m py_compile ingest_daemon.py rag_api.py scripts/build_index.py
 
 # 联调冒烟
@@ -178,7 +182,7 @@ python ingest_daemon.py --once 测试.md --vault 工作事务   # 单篇全管�
 
 发布 checklist（每次对外提交前）：
 1. 单测全绿 + `--once` 带图草稿冒烟走通全管线
-2. 更新本文档第 0 节版本表与受影响小节（README 同步）
+2. **文档同步（铁律，详见 `CLAUDE.md`）**：更新本文档第 0 节版本表 + 全部受影响小节，README.md 对应段落同步——**文档不同步 = 变更未完成**。AI 助手必须主动执行本条，无需用户提醒
 3. 提交并打标：
 ```bash
 git add -A && git commit -m "feat: <摘要>"
