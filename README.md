@@ -26,7 +26,7 @@ SmartVault/
 │   ├── uninstall_launchd.sh         # 一键卸载
 │   ├── start_all.sh                 # 前台手动联调（Ctrl+C 一起退出）
 │   └── build_index.py               # 手动索引维护（增量 / 全量重建）
-├── tests/                           # 单元测试：纯函数 / 最近错误扫描 / LLM 客户端 / RAG 流式解码 / OpenAI 兼容层
+├── tests/                           # 单元测试：纯函数 / 最近错误扫描 / LLM 客户端 / RAG 流式解码 / OpenAI 兼容层 / 归档保真性
 ├── models/                          # 本地嵌入模型（bge-small-zh-v1.5，手动下载）
 ├── data/                            # ChromaDB 持久化 + 索引状态
 └── logs/                            # 运行日志（自动轮转）
@@ -100,8 +100,10 @@ cp config.example.json config.json   # 真实配置不入 git（含个人路径�
 2. 按类型解析附件：图像→Vision OCR；音视频→whisper(Metal)；PDF→PyMuPDF；Office→python-docx/openpyxl/python-pptx；iWork→QuickLook/Preview.pdf
 3. 注入「仓库目录树 + ai_context.md（规则与历史索引）」让 LLM 生成 Strict JSON
    （`target_folder / new_filename / summary / tags / optimized_content`，全简体中文）
-4. 校验净化（拒绝越权目录、非法文件名），移动附件、写入带 YAML 属性的终稿、删除草稿
+4. 校验净化（拒绝越权目录、非法文件名），移动附件、写入带 YAML 属性的终稿、备份草稿到 `.smartvault/backup/`（保留最近 100 份）后删除
 5. 追加历史索引到 `ai_context.md`，并用 `obsidian://open?...` 唤醒 Obsidian 打开新笔记
+
+**长文保守模式（v1.3.1）**：草稿超过 `processing.rewrite_max_chars`（默认 6000 字符）时，LLM 只负责目录/文件名/摘要/标签，**正文原样保留原文**——长文交给 LLM「整理」必然压缩失真甚至编造数字（v1.3.0 及之前的事故模式），短文（语音转录、OCR、随手记）才做 AI 排版整理，且要求所有事实数字逐字来自原文、对话体保持原结构。
 
 调试命令：
 
