@@ -8,6 +8,7 @@
 
 | 版本 | 日期 | 变更摘要 | git tag |
 |---|---|---|---|
+| 1.5.0 | 2026-08-30 | 新增：① **附件统一收纳**——`processing.attachments_subfolder` 默认值改为 `附件`（原空=与笔记同目录），归档附件进入归类目录下 `附件/` 子目录（wikilink 全局按名解析无需改写，重名改写/标准 md 链接子目录前缀逻辑不变）；② **菜单栏 RAG 维护按钮**——「🧹 清理已删笔记残留（同步索引）」触发 `/reindex` 增量同步、「♻️ 重建 RAG 索引（清空后重建）」带确认弹窗触发全量重建（清空测试库后一键归零索引），配套 `http_post_json`；③ **删除笔记的残留清理**——新增 `prune_ai_context_entries`：`sync()` 每轮（后台周期 + 手动触发）顺带剔除 ai_context.md 中指向已删除笔记的失效归档条目，剔除后 ai_context.md mtime 变化即被本轮重新索引（自愈闭环）；`/status` 新增 `last_prune` 字段。新增 4 项单测 `tests/test_rag_client.py`；E2E 实测：带附件草稿归档后附件落位 `房产证办理/附件/`、删除笔记后增量同步剔除 ai_context 死链条目 | `v1.5.0` |
 | 1.4.0 | 2026-08-30 | 行为变更：**原文保留模式成为默认**——用户核心诉求「原文不可被 AI 改变」从长文扩展到全部草稿：新增 `processing.content_rewrite`（默认 false），关闭时所有草稿正文逐字保留、LLM 仅产元数据（目录/文件名/摘要/标签）；开启后仅 `rewrite_max_chars` 阈值内短文允许 AI 整理，超阈值仍保留原文。修复保守模式丢附件转录：新增 `build_preserved_content`，把 OCR/Whisper 转录以「## 附：附件转录（机器自动生成…以原附件为准）」折叠引用块附加文末（v1.3.1 原实现正文=原文导致转录不可检索）。summary 幻觉防线：SYSTEM_PROMPT / NOTE_JSON_SCHEMA / 保留模式指令三处强制摘要严格取材原文、禁止出现原文没有的数字。新增 3 项单测（`build_preserved_content`）；实测短草稿默认走保留模式、正文逐字一致 | `v1.4.0` |
 | 1.3.1 | 2026-08-30 | 修复：**长草稿归档内容失真**——19941 字符面试准备笔记被 LLM「整理」后仅剩 2702 字节（94% 内容丢失），且编造「准确率提升 17%」「接口覆盖率 75%」等原文不存在的数字。根因四连：① 归档设计为 LLM 重写而非原文保留，「保留关键事实」给了模型自由压缩裁量权；② `max_tokens:4096` 输出预算物理上装不下长文，「禁止遗漏要点」不可能执行；③ 压缩任务+「善用表格代码块」排版诱导触发补全式幻觉；④ 归档成功即删草稿且无备份，损失不可逆。修复：**长文保守模式**（超 `processing.rewrite_max_chars`(默认6000) 字符的草稿，LLM 仅生成元数据，正文原样保留原文）；prompt 加忠实性硬约束（数字/事实必须逐字来自原文、对话体保持原结构、禁缩写扩写）；短文模式 LLM 未返回正文也回退原文（内容永不丢失）；`max_tokens` 提至 16384；归档前自动备份草稿至 `.smartvault/backup/`（保留 100 份，RAG 已排除该目录）；`choose_target_dir` 剥离 LLM 误带的仓库名前缀（修复三级路径误回退未分类）。新增 11 项单测 `tests/test_ingest_fidelity.py`；已实测长文归档正文 43168 字节完整保留、幻觉数字 0 次出现 | `v1.3.1` |
 | 1.3.0 | 2026-08-30 | 新增：**OpenAI 兼容适配层** `GET /v1/models` + `POST /v1/chat/completions`（非流式 + `chat.completion.chunk` SSE 流式）——BMO Chatbot 等 Obsidian 插件填 REST API URL `http://127.0.0.1:8788/v1` 即可直连 SmartVault RAG；末条 user 消息作检索 query、携带最近 6 轮历史、客户端 system 人设被忽略（以 RAG 接地约束为准）、参考来源以 Markdown 附录追加在回答末尾；协议契约对齐 BMO 源码（模型列表 `data[].id`、流式 `delta.content` + `finish_reason=="stop"` 停止帧 + `data: [DONE]`）；新增 14 项单测 `tests/test_openai_compat.py`（含 BMO 解析逻辑 Python 复刻回归） | `v1.3.0` |
@@ -76,6 +77,7 @@ CLI：`--check` 环境自检｜`--scan` 批处理积压｜`--once 文件 --vault
 | 离线闸门 | 模块顶部 `os.environ` | `HF_HUB_OFFLINE=1` / `TRANSFORMERS_OFFLINE=1` 等，必须在 import 前设置 |
 | 嵌入 | `BGEEmbeddings` | 本地 sentence-transformers 加载 bge-small-zh-v1.5；检索 query 加官方指令前缀；MPS 不可用回退 CPU |
 | 索引 | `VaultIndexer` | Markdown 标题+递归分块；mtime 短路 + md5 兜底的增量 `sync`；`rebuild` 全量重建；`search` 余弦检索；排除 `rag.exclude_folders` |
+| 死链清理 | `prune_ai_context_entries` | `sync()` 开头顺带剔除 ai_context.md 中指向已删除笔记的「历史归档索引」条目（append-only 遗留死链）；无剔除不写盘；人工改写过的非标准条目保守不动；剔除后 mtime 变化即被本轮重新索引（自愈闭环）；`/status` 报 `last_prune` |
 | 生成 | `LMStudioClient` | 阻塞 + SSE 流式两种调用（流式逐行 bytes 显式 UTF-8 解码，防 requests 对无 charset 头按 ISO-8859-1 解码的乱码陷阱）；RAG 提示词拼装 |
 | API | FastAPI `lifespan`、`/ask` `/health` `/status` `/reindex`、`GET /ui`、`/v1/models` `/v1/chat/completions` | lifespan 启动后台周期 sync 线程；`/ask` 支持 `stream:true`（SSE：sources→message×N→done）；`/ui` 返回 `static/chat.html` 单页聊天界面；`/v1/*` 为 OpenAI 兼容适配层（BMO Chatbot 等插件直连，query=末条 user 消息、历史≤6 轮、来源以 Markdown 附录并入回答） |
 
@@ -89,9 +91,10 @@ macOS 状态栏常驻应用（rumps/PyObjC），是 launchd 的图形前端 + �
 |---|---|---|
 | 服务描述 | `ServiceSpec`（INGEST / RAG / MENUBAR 三个实例） | label / 日志 / 模板路径；`render()` 做 `@PROJECT_DIR@`/`@PYTHON@` 占位符替换（与 install_launchd.sh 等价） |
 | launchd 封装 | `svc_info` `svc_state` `svc_start/stop/uninstall` | `launchctl print` 判 installed；`list` 解析 PID 与上次退出码（区分 running/starting/crashed/stopped）；启动幂等（已运行直接返回，不再隐式重启）；未运行时 bootout→等待→bootstrap×5 重试（复用 v1.0.1 竞态修复）；停止=bootout（保留 plist）；卸载=bootout+删 plist |
-| 诊断 | `port_open` `http_json` `recent_errors` `tail_in_terminal` | 端口探测（不做阻塞 HTTP）；`/health` `/status` 拉取；日志错误**增量扫描**（按字节偏移只报自上次检查以来的新增，状态持久化 `logs/.menubar_err_state.json`；首跑清零历史、截断/轮转自动重读、末尾半行顺延、连续去重；`consume=False` 供健康检查只看不消费）；osascript 让 Terminal 执行 tail -f |
+| 诊断 | `port_open` `http_json` `http_post_json` `recent_errors` `tail_in_terminal` | 端口探测（不做阻塞 HTTP）；`/health` `/status` 拉取；`http_post_json` 触发型接口（`/reindex`）；日志错误**增量扫描**（按字节偏移只报自上次检查以来的新增，状态持久化 `logs/.menubar_err_state.json`；首跑清零历史、截断/轮转自动重读、末尾半行顺延、连续去重；`consume=False` 供健康检查只看不消费）；osascript 让 Terminal 执行 tail -f |
 | 单例锁 | `_acquire_single_instance_lock` | `fcntl.flock(logs/.menubar.lock)`；重复实例直接退出（bootstrap 安装自启项时靠它避免双图标） |
 | UI | `SmartVaultBar`（rumps.App） | `refresh()` 仅状态 key 变化时重建菜单（防闪烁）；`@rumps.timer(5)` 轮询；title 动态：●/◐/○/⚠；`_full_check` 弹窗逐项 ✔/✘；`_log_item_geometry` 启动自诊断（状态项 AX 坐标 + 刘海遮挡检测写 stderr；`autosaveName` 位置持久化） |
+| RAG 维护 | `_sync_index` `_rebuild_index` | 「🧹 清理已删笔记残留（同步索引）」→ `POST /reindex {rebuild:false}`（移除已删文件向量 + 剔除 ai_context.md 死链）；「♻️ 重建 RAG 索引（清空后重建）」→ 确认弹窗后 `POST /reindex {rebuild:true}`（清空向量库按现状重建，清空测试库后归零索引）；RAG 未运行时给出指引 |
 
 关键决策：MENUBAR 自启项 `KeepAlive=false`（手动退出不被拉起，RunAtLoad 登录启动）；对 KeepAlive 服务"停止"必须 bootout（kill 会被 launchd 复活）；**TCC 规避**——经 LaunchServices（Finder/open）启动的 GUI app 无 `~/Documents` 读权限（`PermissionError: pyvenv.cfg`），故 `.app` 仅是"确保 launchd 代理运行"的启动器（plist 内容构建时硬编码、运行时不读项目文件），菜单栏进程一律由 launchd 拉起（双击 .app = 安装/唤醒代理，同时注册开机自启）。
 
@@ -113,7 +116,7 @@ macOS 状态栏常驻应用（rumps/PyObjC），是 launchd 的图形前端 + �
 | `whisper.mlx_model` / `openai_model` / `language` | whisper-large-v3-turbo / small / zh | 两种后端的模型与源语言 |
 | `processing.debounce_seconds` / `quiet_seconds` | 8 / 3 | 双闸防抖：事件观察窗 + 收件箱静默期 |
 | `processing.attachment_wait_timeout` | 30 | 等待引用附件到齐的最长秒数（超时则继续处理现有部分） |
-| `processing.attachments_subfolder` | `""`（空=与笔记同目录） | 附件落盘子目录名 |
+| `processing.attachments_subfolder` | `附件`（空=与笔记同目录） | 附件落盘子目录名：归档附件进入归类目录下的 `附件/` 子目录 |
 | `processing.allow_new_folder` / `max_folder_depth` / `fallback_folder` | true / 2 / 未分类 | LLM 建目录的权限边界：是否允许新建、最大深度、非法/超深时兜底目录 |
 | `processing.content_rewrite` / `rewrite_max_chars` | `false` / 6000 | **正文改写总开关**：false=原文保留模式（默认，全部草稿正文逐字保留，LLM 仅产元数据，附件转录折叠附加文末）；true=短于阈值的草稿允许 AI 排版整理（仍受逐字保真约束），超阈值一律保留原文 |
 | `limits.raw_note_max_chars` / `attachment_max_chars` | 30000 / 12000 | 注入 LLM 前截断阈值，防上下文爆炸 |
@@ -159,6 +162,7 @@ mtime+size 未变 → 直接跳过（O(1)）→ 变了才算 md5 复核 → 确�
 | 新增 Vault | `config.vaults` 追加 → `launchctl kickstart -k gui/$(id -u)/com.user.aibrain` 重启守护进程 |
 | 改 API 端口 | `api.port` + `launchd/com.user.aibrain.rag.plist` 里的 8788 → 重跑 `scripts/install_launchd.sh` |
 | 新增排除目录（不索引） | `rag.exclude_folders` 追加 → 下轮 sync 自动剔除（或手动 rebuild） |
+| 删除笔记 / 清空测试目录后的清理 | 向量块：后台每 300s 增量 sync 自动移除，或菜单栏「🧹 清理已删笔记残留」立即触发；ai_context.md 死链条目同轮被剔除；彻底归零索引（如清空整个测试库）用菜单栏「♻️ 重建 RAG 索引」 |
 
 ## 6. 测试与发布流程
 

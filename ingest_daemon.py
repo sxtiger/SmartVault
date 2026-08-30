@@ -107,7 +107,7 @@ CONFIG_DEFAULTS: Dict[str, Any] = {
     "whisper": {"backend": "auto", "mlx_model": "mlx-community/whisper-large-v3-turbo",
                 "openai_model": "small", "language": "zh"},
     "processing": {"debounce_seconds": 8, "quiet_seconds": 3, "attachment_wait_timeout": 30,
-                   "attachments_subfolder": "", "allow_new_folder": True, "max_folder_depth": 2,
+                   "attachments_subfolder": "附件", "allow_new_folder": True, "max_folder_depth": 2,
                    "fallback_folder": "未分类", "content_rewrite": False, "rewrite_max_chars": 6000},
     "limits": {"raw_note_max_chars": 30000, "attachment_max_chars": 12000},
     "rag": {"enabled": True, "embedding_model_path": "models/bge-small-zh-v1.5",

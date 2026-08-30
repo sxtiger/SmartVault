@@ -191,6 +191,21 @@ def http_json(path: str, timeout: float = 3.0) -> Optional[Dict[str, Any]]:
         return None
 
 
+def http_post_json(path: str, payload: Dict[str, Any],
+                   timeout: float = 5.0) -> Tuple[bool, Optional[Dict[str, Any]]]:
+    """POST JSON 并返回 (是否成功, 响应体)；用于 /reindex 等触发型接口。"""
+    try:
+        r = requests.post(f"http://127.0.0.1:{RAG_PORT}{path}", json=payload, timeout=timeout)
+        if r.status_code != 200:
+            return False, None
+        try:
+            return True, r.json()
+        except ValueError:
+            return True, {}
+    except Exception:
+        return False, None
+
+
 _ERROR_PAT = re.compile(
     r"\[ERROR\]|\[CRITICAL\]|Traceback|Bootstrap failed|ModuleNotFoundError"
     r"|FileNotFoundError|Address already in use|CUDA|core dump"
@@ -344,6 +359,9 @@ class SmartVaultBar(rumps.App):
         menu.append(self._svc_submenu(RAG, rag))
         menu += [
             rumps.separator,
+            rumps.MenuItem("🧹 清理已删笔记残留（同步索引）", callback=self._sync_index),
+            rumps.MenuItem("♻️ 重建 RAG 索引（清空后重建）…", callback=self._rebuild_index),
+            rumps.separator,
             rumps.MenuItem("🔍 综合健康检查…", callback=self._full_check),
             rumps.MenuItem("⚠️ 最近错误分析…", callback=self._show_errors),
             rumps.MenuItem("🛠 打开日志文件夹", callback=lambda _: open_in_finder(LOG_DIR)),
@@ -438,6 +456,48 @@ class SmartVaultBar(rumps.App):
             tail_in_terminal(p)
         else:
             rumps.alert("暂无日志", f"未找到 {p}")
+
+    def _sync_index(self, _):
+        """RAG 增量同步：移除已删笔记的向量块 + 清理 ai_context.md 失效条目。"""
+        if not port_open(RAG_PORT):
+            self._notify("清理已删笔记残留", False,
+                         f"RAG 服务未在运行（端口 {RAG_PORT} 未监听），请先启动服务。")
+            return
+        ok, resp = http_post_json("/reindex", {"rebuild": False})
+        if not ok or not (resp or {}).get("started"):
+            self._notify("清理已删笔记残留", False,
+                         "请求 /reindex 失败，请用「最近错误分析」或 RAG 实时日志排查。")
+            return
+        self._notify("清理已删笔记残留", True,
+                     "增量同步已在后台执行：已删除笔记的向量块与 ai_context.md\n"
+                     "失效归档条目将被移除，现存笔记不受影响。\n\n"
+                     "（后台每 5 分钟也会自动同步一次；剔除明细见 RAG 服务日志）")
+
+    def _rebuild_index(self, _):
+        """RAG 全量重建：先清空整个向量库，再按当前仓库实际文件重建。"""
+        if not port_open(RAG_PORT):
+            self._notify("重建 RAG 索引", False,
+                         f"RAG 服务未在运行（端口 {RAG_PORT} 未监听），请先启动服务。")
+            return
+        w = rumps.Window(
+            title="重建 RAG 索引",
+            message="将清空整个向量库，再按当前仓库内实际存在的笔记全量重建。\n\n"
+                    "适用：清空/大批量删除测试笔记后让索引归零、\n"
+                    "修改分块参数后重建。\n\n"
+                    "现存笔记会重新索引；完成前问答可能不完整，\n"
+                    "耗时取决于笔记量。确认请点 OK。",
+            dimensions=(560, 280))
+        if not w.run().clicked:
+            return
+        ok, resp = http_post_json("/reindex", {"rebuild": True})
+        if not ok or not (resp or {}).get("started"):
+            self._notify("重建 RAG 索引", False,
+                         "请求 /reindex 失败，请用「最近错误分析」或 RAG 实时日志排查。")
+            return
+        self._notify("重建 RAG 索引", True,
+                     "全量重建已启动：向量库已清空并开始按当前仓库重建。\n"
+                     "若仓库已清空，完成后索引即为 0 条\n"
+                     "（可用「综合健康检查」查看 chunks 数）。")
 
     def _am_launchd_instance(self) -> bool:
         """当前控制台进程是否由 launchd 作业 MENUBAR 运行（bootout 会终止自身）。"""
