@@ -6,7 +6,7 @@ macOS（Apple Silicon）上 100% 本地运行的 Obsidian AI 知识管理系统�
 | 模块 | 文件 | 职责 |
 |---|---|---|
 | A. 摄入与归档守护进程 | `ingest_daemon.py` | watchdog 监听多 Vault 的「待处理笔记」收件箱，多模态解析附件，LLM 提炼为 Strict JSON，自动归类落盘并唤醒 Obsidian |
-| B. 对话式知识查询服务 | `rag_api.py` | FastAPI 本地 RAG：中文嵌入 + ChromaDB 向量检索 + LM Studio 生成，`POST /ask` 返回带引用来源的回答（支持 SSE 流式） |
+| B. 对话式知识查询服务 | `rag_api.py` | FastAPI 本地 RAG：中文嵌入 + ChromaDB 向量检索 + LM Studio 生成；自带浏览器聊天界面（`GET /ui`），`POST /ask` 返回带引用来源的回答（支持 SSE 流式） |
 
 ```
 SmartVault/
@@ -15,6 +15,8 @@ SmartVault/
 ├── config.example.json              # 配置模板（入 git；复制为 config.json 后修改）
 ├── ingest_daemon.py                 # 模块 A：摄入与归档守护进程
 ├── rag_api.py                       # 模块 B：FastAPI 本地 RAG 服务
+├── static/
+│   └── chat.html                    # 浏览器聊天界面（GET /ui，零依赖离线单页）
 ├── requirements.txt                 # Python 依赖清单
 ├── launchd/
 │   ├── com.user.aibrain.plist       # launchd 模板：模块 A（登录自启 + 崩溃拉起）
@@ -24,8 +26,7 @@ SmartVault/
 │   ├── uninstall_launchd.sh         # 一键卸载
 │   ├── start_all.sh                 # 前台手动联调（Ctrl+C 一起退出）
 │   └── build_index.py               # 手动索引维护（增量 / 全量重建）
-├── tests/
-│   └── test_pure_functions.py       # 纯函数单元测试（无需第三方依赖）
+├── tests/                           # 单元测试：纯函数 / 最近错误扫描 / LLM 客户端 / RAG 流式解码
 ├── models/                          # 本地嵌入模型（bge-small-zh-v1.5，手动下载）
 ├── data/                            # ChromaDB 持久化 + 索引状态
 └── logs/                            # 运行日志（自动轮转）
@@ -112,10 +113,18 @@ python ingest_daemon.py --scan                  # 批量处理积压草稿
 python ingest_daemon.py                         # 前台常驻
 ```
 
-### 模块 B：知识问答 API
+### 模块 B：知识问答（聊天界面 + API）
+
+服务启动后，**日常使用直接打开浏览器聊天界面**（推荐入口）：
+
+```
+http://127.0.0.1:8788/ui
+```
+
+输入问题即获得**流式回答**与**参考来源**（笔记标题 + 路径 + 相关度），页面顶部实时显示索引健康状态。零外部依赖、完全离线。另有交互式 API 调试台 `http://127.0.0.1:8788/docs`。
 
 ```bash
-python rag_api.py        # 启动 http://127.0.0.1:8788，后台自动增量索引
+python rag_api.py        # 前台手动启动 http://127.0.0.1:8788，后台自动增量索引
 ```
 
 | 接口 | 说明 |
