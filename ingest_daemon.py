@@ -524,8 +524,37 @@ def load_ai_context(path: Path, max_chars: int) -> str:
     return (text[:head_keep] + "\n……（中间历史索引已省略）……\n" + text[len(text) - tail_keep:])
 
 
+def _drop_stale_ctx_entries(path: Path, stem: str) -> int:
+    """移除 ai_context.md 中文件名（alias）与 stem 相同的「历史归档索引」条目。
+
+    场景：误归档笔记移回收件箱重新归档时，指向旧目录的条目会随 Prompt
+    注入形成「历史一致性」锚定（SYSTEM_PROMPT 规则 5），使 LLM 沿用旧
+    目录、纠错失效；append-only 也会堆积重复条目。仅匹配标准生成行
+    `- 文件：[[…|stem]]`（人工改写的非标准条目保守不动）；无移除不写盘；
+    读写失败返回 0（追加逻辑照常执行）。
+    """
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return 0
+    parts = re.split(r"(?=^## )", text, flags=re.M)
+    pat = re.compile(rf"^- 文件：\[\[.*\|{re.escape(stem)}\]\]\s*$", re.M)
+    kept = [p for p in parts if not pat.search(p)]
+    if len(kept) == len(parts):
+        return 0
+    try:
+        path.write_text("".join(kept), encoding="utf-8")
+    except OSError:
+        return 0
+    return len(parts) - len(kept)
+
+
 def append_ai_context(vault: Vault, meta: Dict[str, Any], final_md: Path) -> None:
-    """归档成功后向 ai_context.md 追加历史索引条目（文件不存在则带模板创建）。"""
+    """归档成功后向 ai_context.md 追加历史索引条目（文件不存在则带模板创建）。
+
+    重归档自愈（v1.6.1）：追加前先移除同文件名的旧条目，索引始终只保留
+    该笔记的最新归档位置。
+    """
     path = vault.context_file
     rel = final_md.relative_to(vault.root)
     link = rel.as_posix()[:-3] if rel.as_posix().lower().endswith(".md") else rel.as_posix()
@@ -547,6 +576,10 @@ def append_ai_context(vault: Vault, meta: Dict[str, Any], final_md: Path) -> Non
             "## 历史归档索引\n",
             encoding="utf-8",
         )
+    else:
+        removed = _drop_stale_ctx_entries(path, final_md.stem)
+        if removed:
+            LOG.info("ai_context 重归档去重：移除 %d 条旧条目（%s）", removed, final_md.stem)
     with open(path, "a", encoding="utf-8") as f:
         f.write(entry)
 
@@ -637,7 +670,8 @@ SYSTEM_PROMPT = """你是「SmartVault 智能仓库」的资深知识管理图�
 4. 附件的解析文本必须融入正文：以“> [!quote]- 附件：文件名”折叠引用块或独立小节呈现，冗长转录可提炼要点但不得丢失信息。
 5. 若提供了 ai_context.md 内容，必须严格遵守其中的「AI 处理规则」，并与「历史归档索引」中已有标签体系、双链风格保持一致。
 6. 全部输出内容（target_folder、new_filename、summary、tags、optimized_content）一律使用简体中文；专有名词、代码、命令、英文缩写、文件名与扩展名除外。
-7. 清除草稿痕迹：删除“待处理”“测试”等临时字样与冗余空白，输出即终稿。"""
+7. 清除草稿痕迹：删除“待处理”“测试”等临时字样与冗余空白，输出即终稿。
+8. 超短草稿（正文不足约 200 字符，多为链接收藏、账号信息、碎片备忘）语义信号弱：必须依据笔记的实际用途与关键实体（链接指向的站点/工具、邮箱、账号、备忘主题）判断归类，不得凭个别词语的弱关联塞入已有目录，确无贴切目录时新建；这些关键信息须如实写入 summary 与 tags。"""
 
 
 def build_user_prompt(vault_name: str, draft_name: str, raw_md: str,

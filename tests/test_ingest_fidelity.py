@@ -190,5 +190,56 @@ class TestPruneEmptyDirs(unittest.TestCase):
             self.assertTrue((inbox / "a.md").exists())
 
 
+class TestAppendAiContext(unittest.TestCase):
+    """v1.6.1 重归档自愈：同文件名旧条目应被移除，避免历史锚定与重复堆积。"""
+
+    def _vault(self, d: str) -> sv.Vault:
+        root = Path(d) / "库"
+        (root / "网络工具").mkdir(parents=True)
+        (root / "网络工具" / "claude_pro.md").write_text("x", encoding="utf-8")
+        return sv.Vault(name="库", root=root, inbox=root / "待处理笔记",
+                        context_file=root / "ai_context.md")
+
+    @staticmethod
+    def _meta(folder: str) -> dict:
+        return {"target_folder": folder, "summary": "摘要", "tags": ["A", "B", "C"]}
+
+    def test_rearchive_replaces_stale_entry(self):
+        """旧条目（指向旧目录）被移除；新条目追加、无关条目保留、无重复堆积。"""
+        with tempfile.TemporaryDirectory() as d:
+            v = self._vault(d)
+            v.context_file.write_text(
+                "# ai_context\n\n## AI 处理规则\n\n规则。\n\n## 历史归档索引\n"
+                "\n## 2026-08-30 21:15｜SmartVault 归档\n"
+                "- 文件：[[Obsidian指南/claude_pro|claude_pro]]\n"
+                "- 目录：智能笔记/Obsidian指南\n- 摘要：旧\n- 标签：#旧\n"
+                "\n## 2026-08-30 21:16｜SmartVault 归档\n"
+                "- 文件：[[开发环境/git安装指南|git安装指南]]\n"
+                "- 目录：开发环境\n- 摘要：无关\n- 标签：#Git\n",
+                encoding="utf-8")
+            final_md = v.root / "网络工具" / "claude_pro.md"
+            sv.append_ai_context(v, self._meta("网络工具"), final_md)
+            text = v.context_file.read_text(encoding="utf-8")
+            self.assertNotIn("Obsidian指南/claude_pro", text)         # 同 stem 旧条目 → 移除
+            self.assertIn("[[网络工具/claude_pro|claude_pro]]", text)  # 新条目 → 追加
+            self.assertIn("[[开发环境/git安装指南|git安装指南]]", text)  # 无关条目 → 保留
+            self.assertEqual(text.count("claude_pro]]"), 1)           # 无重复堆积
+
+    def test_first_archive_creates_template(self):
+        """ai_context.md 不存在时带模板创建并追加首条。"""
+        with tempfile.TemporaryDirectory() as d:
+            v = self._vault(d)
+            final_md = v.root / "网络工具" / "claude_pro.md"
+            sv.append_ai_context(v, self._meta("网络工具"), final_md)
+            text = v.context_file.read_text(encoding="utf-8")
+            self.assertIn("## AI 处理规则", text)
+            self.assertIn("[[网络工具/claude_pro|claude_pro]]", text)
+
+    def test_prompt_locks_short_draft_rule(self):
+        """SYSTEM_PROMPT 须含超短草稿防蹭目录规则（防后续误删回归）。"""
+        self.assertIn("超短草稿", sv.SYSTEM_PROMPT)
+        self.assertIn("弱关联", sv.SYSTEM_PROMPT)
+
+
 if __name__ == "__main__":
     unittest.main()

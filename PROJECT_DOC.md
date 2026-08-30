@@ -8,6 +8,7 @@
 
 | 版本 | 日期 | 变更摘要 | git tag |
 |---|---|---|---|
+| 1.6.1 | 2026-08-30 | 修复（E2E 取证：claude_pro.md 内容与 Obsidian 无关却归入「Obsidian指南」）：① **重归档自愈**——`append_ai_context()` 追加前经 `_drop_stale_ctx_entries()` 按文件名移除旧历史条目：旧条目随 Prompt 注入会形成「历史一致性」锚定（SYSTEM_PROMPT 规则 5 要求与历史索引保持一致），使误归档笔记移回收件箱后仍被 LLM 沿用旧目录、纠错失效（实测两次重归档均跟随旧目录），且 append-only 堆积重复条目；现同 stem 仅保留最新一条，**误归档纠正=移回收件箱即可**（无需再手动删 ai_context 条目）；与 `prune_ai_context_entries`（死链清理）正交互补；② **超短草稿防蹭目录**——SYSTEM_PROMPT 新增规则 8：正文不足约 200 字符的链接收藏/账号信息/碎片备忘须按实际用途与关键实体（站点/工具/邮箱/账号）归类，禁止凭个别词语的弱关联塞入已有目录。新增 3 项单测（`TestAppendAiContext`，共 73 项）；README「分类体系全自动」+ 本文档 How-to/管线时序/模块地图同步 | `v1.6.1` |
 | 1.6.0 | 2026-08-30 | 功能：① **AI 自动分类**——SYSTEM_PROMPT 整理规则强化：目录树无合适目录时 LLM 须依据主题自建简洁一级目录（2~6 字，如「开发环境」「AI 工具」），分类体系随归档自然生长、同主题复用；严禁输出「未分类」「笔记」「文档」「其他」等无信息量目录名——根治空仓库冷启动首篇回退 `fallback_folder` 且后续笔记持续跟随的雪球效应；② **收件箱空目录自动清理**——新增 `prune_empty_dirs()`（归档成功后 + 启动补扫时自底向上清理，含仅含 .DS_Store 的目录；收件箱根与含真实文件的目录永不删），解决迁移场景残留空 `附件/` 目录问题；③ 无附件时不再预创建空 `附件/` 目录（`attach_dir` 条件创建）。README「分类体系全自动」节替换原「冷启动雪球」三步手动法；新增 3 项单测（`TestPruneEmptyDirs`）；E2E：15 篇「未分类」存量笔记移回收件箱自动重归档为 4 个主题目录（开发环境 11/Obsidian指南 2/网络工具 2/安全工具 1），附件随迁、空目录自动清理、历史索引死链自动剔除 | `v1.6.0` |
 | 1.5.4 | 2026-08-30 | 文档：① 新增**旧仓库迁移指南**（README + 本文档第 5 节）——笔记连同 `附件/` 目录整体投入收件箱即可（watchdog 递归监听 + `resolve_attachment` 递归按文件名定位，wikilink 带不带路径均可解析）；两个注意事项：附件目录内 .md 会被误当草稿、归档后空附件目录需手动清理；② 新增**「未分类」冷启动雪球**对策（README + 本文档第 5 节 + Roadmap）——根因：空目录树时首篇易回退 `fallback_folder`，「优先选已有目录」规则使后续笔记持续跟随未分类；对策：建分类目录 + ai_context.md 规则区写分类约定 + 存量笔记拖动归位（mtime 变化自动重索引）；Roadmap 短期新增「冷启动分类引导」优化项 | `v1.5.4` |
 | 1.5.3 | 2026-08-30 | 文档：明确 **BMO/问答 API 的检索范围为全部注册仓库（全局）**（README BMO 小节 + 本文档 4.3）——`/ask` 与 `/v1/chat/completions` 共用 `search()`，对共享 collection 整体 Top-K 检索、无 vault 过滤（块元数据 `vault` 字段仅用于路径展示），Obsidian「当前打开哪个仓库」不影响检索范围；标注按仓库过滤暂不支持及实现思路（Chroma `where` 过滤） | `v1.5.3` |
@@ -68,7 +69,7 @@
 | 目标目录 | `choose_target_dir` | 已存在目录优先 → 深度 ≤ max_folder_depth 才允许新建整条链路 → 兜底 fallback；收件箱与根目录永远禁止 |
 | 引用解析 | `find_attachment_refs` `resolve_attachment` `rewrite_links` | 提取 `![[x]]` 嵌入与标准 md 附件链接（跳过 URL/锚点/md 笔记）→ 收件箱定位（无扩展名自动补全）→ 附件改名后同步改写正文 |
 | 多模态解析 | `parse_attachment`（按扩展名分发） | png/jpg…→ocrmac(Vision)；音视频→mlx-whisper（自动回退 openai-whisper）；pdf→PyMuPDF；docx/xlsx/pptx→对应库；pages/numbers/key→包内 QuickLook/Preview.pdf |
-| 上下文 | `scan_tree` `load_ai_context` | 目录树（排除隐藏目录/收件箱，限 tree_depth 层）；ai_context 超长时保头尾智能截断 |
+| 上下文 | `scan_tree` `load_ai_context` `_drop_stale_ctx_entries` | 目录树（排除隐藏目录/收件箱，限 tree_depth 层）；ai_context 超长时保头尾智能截断；追加历史条目前按文件名移除同 stem 旧条目（重归档自愈，防旧目录经 Prompt 锚定 LLM、防条目重复堆积，仅匹配标准生成行、人工条目保守不动） |
 | LLM | `LLMClient` `SYSTEM_PROMPT` `parse_llm_json` | 优先 `response_format: json_schema` 结构化输出，LM Studio 400 时自动降级（上下文超限除外——识别为独立错误并给出重载指引，不做无谓重发）；鲁棒解析（去围栏/截噪声/tags 类型容错） |
 | 落盘 | `build_final_markdown` `run_pipeline` `unique_path` `prune_empty_dirs` | YAML frontmatter（引号转义）；管线编排；重名追加 ` 2` 序号；归档后/启动补扫时清理收件箱空目录（含仅含 .DS_Store 的，根目录与含真实文件的目录永不删） |
 | 守护 | `VaultState`、watchdog handler、`run_daemon` / `run_check` / `run_scan` / `main` | 双闸防抖（观察窗+静默期+大小稳定）、附件到齐等待、每 Vault 独立队列与工作线程 |
@@ -147,7 +148,7 @@ macOS 状态栏常驻应用（rumps/PyObjC），是 launchd 的图形前端 + �
 5. `LLMClient` 结构化输出 → `parse_llm_json` 容错解析出五字段 Strict JSON
 6. `choose_target_dir` 校验/创建目录 → `unique_path` 确定终稿唯一路径
 7. 附件移动（目标重名自动加序号 + `rewrite_links` 同步改写正文引用）→ 写终稿（YAML frontmatter）→ 删除草稿 → `prune_empty_dirs` 清理收件箱空目录
-8. `ai_context.md` 追加一行历史索引 → `obsidian://open?vault=…&file=…` 唤醒
+8. `ai_context.md` 追加历史索引（v1.6.1 起先按文件名移除同名旧条目——重归档自愈，防旧目录锚定 LLM）→ `obsidian://open?vault=…&file=…` 唤醒
 
 ### 4.2 增量索引（`VaultIndexer.sync`，模块 B 后台线程）
 mtime+size 未变 → 直接跳过（O(1)）→ 变了才算 md5 复核 → 确实变化则重新分块并按文档 ID 先删后插 → 文件已删除则同步删向量 + `prune_ai_context_entries` 剔除 ai_context.md 死链条目。`rebuild()` 清空 collection 全量重建（**全局操作**：所有 Vault 的向量一并清空后重嵌）。
@@ -177,12 +178,13 @@ mtime+size 未变 → 直接跳过（O(1)）→ 变了才算 md5 复核 → 确�
 | 注销一个 Vault（弃用仓库） | **先**从 `config.vaults` 移除条目 → 删除仓库文件夹 → 重启摄入守护进程 → 点「🧹 清理已删笔记残留」（该仓库全部向量自动移除，无需 rebuild）。顺序不能反：只删文件夹不注销，守护进程每次启动都会记「Vault 目录不存在」ERROR（不会重建目录、不影响其他仓库，但污染「最近错误分析」）。多仓库清理影响详见 README「多仓库与索引清理」 |
 | 从旧仓库迁移（笔记 + 附件目录） | 文档连同 `附件/` 子目录整体放入收件箱即可：watchdog `recursive=True` 递归监听、`resolve_attachment()` 递归按文件名定位（wikilink 带不带路径均可）。注意：附件目录内的 **.md 会被当作草稿**（`rglob("*.md")`）；归档后空 `附件/` 目录残留需手动删 |
 | 归类全进「未分类」 | v1.6.0 起已根治：SYSTEM_PROMPT 要求 LLM 无合适目录时按主题自建简洁一级目录（2~6 字）、严禁输出「未分类」等无意义名，分类体系随归档自然生长。存量「未分类」笔记重新归类：整篇（连同附件）移回收件箱自动重归档（正文原样保留、元数据重新生成、历史索引死链自动剔除）；也可在 ai_context.md 规则区写分类约定进一步约束 |
+| 笔记被误归档（如内容与目录主题无关） | 整篇（连同附件）移回收件箱即可：v1.6.1 起归档时自动替换 ai_context.md 中同名旧条目（此前旧条目注入 Prompt 会锚定 LLM 沿用旧目录，需手动删条目）；元数据重新生成、正文原样保留、指向旧路径的向量在下一轮增量同步自动剔除。另：超短碎片笔记（链接收藏/账号信息）已由 SYSTEM_PROMPT 规则 8 要求按实际用途归类、禁止凭弱关联蹭已有目录 |
 
 ## 6. 测试与发布流程
 
 ```bash
 # 日常验证（零三方依赖，任何机器可跑）
-python3 -m unittest discover -s tests          # 70 项单测（纯函数 + 客户端解码 + OpenAI 兼容层 + 归档保真性 + ai_context 清理 + 空目录清理）
+python3 -m unittest discover -s tests          # 73 项单测（纯函数 + 客户端解码 + OpenAI 兼容层 + 归档保真性 + ai_context 清理 + 空目录清理 + 重归档自愈）
 python3 -m py_compile ingest_daemon.py rag_api.py scripts/build_index.py
 
 # 联调冒烟
