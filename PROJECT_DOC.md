@@ -8,6 +8,7 @@
 
 | 版本 | 日期 | 变更摘要 | git tag |
 |---|---|---|---|
+| 1.5.2 | 2026-08-30 | 文档：① 明确**附件转录内容可被知识问答命中**（README 模块 B + 本文档 4.3）——OCR/whisper/PDF/Office 转录随笔记正文分块嵌入，E2E 实测发票图片上的编号/金额/开户行三个事实（正文只字未提）问答全部命中并引用来源；同时标注边界：从未走过收件箱管线的存量附件不被解析索引；② 故障排查表 + README 模块 A 新增**收件箱目录删除后 watchdog 断监听**问题（目录重建不重挂监听、新草稿被无限搁置且日志无记录；处置=重启摄入守护进程，启动时自动补扫积压——E2E 实测复现并验证恢复） | `v1.5.2` |
 | 1.5.1 | 2026-08-30 | 文档：① README 新增「多仓库与索引清理」节 + 本文档 4.2/5 节补充——明确多 Vault 共用同一向量集合、按 `仓库名/相对路径` 键隔离的架构事实；🧹 按文件粒度对其他仓库零影响 / ♻️ 全局清空重建的影响边界；清空/弃用仓库的标准流程（先注销 config → 删文件夹 → 重启守护进程 → 点 🧹，顺序反了会持续产生「Vault 目录不存在」错误日志）；「注销即清理」技巧（config 移除条目+重启即自动移除该仓库全部向量）；② 新增 `CLAUDE.md` AI 协作规则——确立**文档同步铁律**（任何功能/行为/配置/修复变更，提交前必须同轮更新 PROJECT_DOC 第 0 节版本表+受影响小节与 README，文档不同步视为变更未完成，无需用户提醒）及提交/测试/服务重启/E2E 验证/数据安全红线约定；第 6 节发布 checklist 同步强化，单测计数修正为 67 | `v1.5.1` |
 | 1.5.0 | 2026-08-30 | 新增：① **附件统一收纳**——`processing.attachments_subfolder` 默认值改为 `附件`（原空=与笔记同目录），归档附件进入归类目录下 `附件/` 子目录（wikilink 全局按名解析无需改写，重名改写/标准 md 链接子目录前缀逻辑不变）；② **菜单栏 RAG 维护按钮**——「🧹 清理已删笔记残留（同步索引）」触发 `/reindex` 增量同步、「♻️ 重建 RAG 索引（清空后重建）」带确认弹窗触发全量重建（清空测试库后一键归零索引），配套 `http_post_json`；③ **删除笔记的残留清理**——新增 `prune_ai_context_entries`：`sync()` 每轮（后台周期 + 手动触发）顺带剔除 ai_context.md 中指向已删除笔记的失效归档条目，剔除后 ai_context.md mtime 变化即被本轮重新索引（自愈闭环）；`/status` 新增 `last_prune` 字段。新增 4 项单测 `tests/test_rag_client.py`；E2E 实测：带附件草稿归档后附件落位 `房产证办理/附件/`、删除笔记后增量同步剔除 ai_context 死链条目 | `v1.5.0` |
 | 1.4.0 | 2026-08-30 | 行为变更：**原文保留模式成为默认**——用户核心诉求「原文不可被 AI 改变」从长文扩展到全部草稿：新增 `processing.content_rewrite`（默认 false），关闭时所有草稿正文逐字保留、LLM 仅产元数据（目录/文件名/摘要/标签）；开启后仅 `rewrite_max_chars` 阈值内短文允许 AI 整理，超阈值仍保留原文。修复保守模式丢附件转录：新增 `build_preserved_content`，把 OCR/Whisper 转录以「## 附：附件转录（机器自动生成…以原附件为准）」折叠引用块附加文末（v1.3.1 原实现正文=原文导致转录不可检索）。summary 幻觉防线：SYSTEM_PROMPT / NOTE_JSON_SCHEMA / 保留模式指令三处强制摘要严格取材原文、禁止出现原文没有的数字。新增 3 项单测（`build_preserved_content`）；实测短草稿默认走保留模式、正文逐字一致 | `v1.4.0` |
@@ -153,6 +154,8 @@ mtime+size 未变 → 直接跳过（O(1)）→ 变了才算 md5 复核 → 确�
 ### 4.3 `/ask` 请求生命周期
 查询加 bge 指令前缀 → 嵌入 → Top-K 余弦检索（按来源路径去重）→ 拼 RAG 提示词（上下文+问题+引用要求）→ LM Studio 生成。SSE 模式事件序：`sources`（先推引用）→ `message`×N（正文增量）→ `done`。
 
+检索范围包含归档笔记文末的「附：附件转录」折叠块（OCR/whisper/PDF/Office 转录随正文一起分块嵌入）——仅存在于附件中的事实同样可被问答命中并引用来源；但**从未走过收件箱管线的存量附件**（直接放进仓库的图片/录音）不会被解析与索引。
+
 ## 5. 常见二次开发场景（How-to）
 
 | 想做什么 | 改哪里 |
@@ -200,6 +203,7 @@ git tag vX.Y.Z && git push && git push --tags
 | 草稿一直不被处理 | 双闸防抖未满足 / 附件未到齐 | 查 `logs/ingest_daemon.log`；用 `--once` 单篇复现 |
 | 归档成功但 Obsidian 未弹出 | `vaults[].name` ≠ Obsidian 仓库名 | 改为完全一致的名称 |
 | OCR 结果乱码 | 语言偏好不匹配 | 调 `vision.language_preference` |
+| 新草稿放入收件箱后一直不被处理（日志也无任何记录） | 收件箱目录曾被删除，watchdog 监听已断开（重建目录不会自动重挂，守护进程看似正常） | 重启摄入守护进程（菜单栏或 `launchctl kickstart -k gui/$(id -u)/com.user.aibrain`），启动时自动补扫积压草稿 |
 | `/ask` 慢且日志见 CPU 回退 | MPS 不可用（内存压力/驱动） | 确认 PyTorch 为 arm64 wheel：`python -c "import torch; print(torch.backends.mps.is_available())"` |
 | Chroma 报锁 / 句柄错误 | 同时跑了两个 rag 实例（手动+launchd） | `launchctl list \| grep aibrain` 只保留一份 |
 | launchd 反复重启（10s 一次） | venv 路径失效（重建过 .venv） | 重跑 `scripts/install_launchd.sh` 重新生成 plist |
