@@ -8,6 +8,7 @@
 
 | 版本 | 日期 | 变更摘要 | git tag |
 |---|---|---|---|
+| 1.3.1 | 2026-08-30 | 修复：**长草稿归档内容失真**——19941 字符面试准备笔记被 LLM「整理」后仅剩 2702 字节（94% 内容丢失），且编造「准确率提升 17%」「接口覆盖率 75%」等原文不存在的数字。根因四连：① 归档设计为 LLM 重写而非原文保留，「保留关键事实」给了模型自由压缩裁量权；② `max_tokens:4096` 输出预算物理上装不下长文，「禁止遗漏要点」不可能执行；③ 压缩任务+「善用表格代码块」排版诱导触发补全式幻觉；④ 归档成功即删草稿且无备份，损失不可逆。修复：**长文保守模式**（超 `processing.rewrite_max_chars`(默认6000) 字符的草稿，LLM 仅生成元数据，正文原样保留原文）；prompt 加忠实性硬约束（数字/事实必须逐字来自原文、对话体保持原结构、禁缩写扩写）；短文模式 LLM 未返回正文也回退原文（内容永不丢失）；`max_tokens` 提至 16384；归档前自动备份草稿至 `.smartvault/backup/`（保留 100 份，RAG 已排除该目录）；`choose_target_dir` 剥离 LLM 误带的仓库名前缀（修复三级路径误回退未分类）。新增 11 项单测 `tests/test_ingest_fidelity.py`；已实测长文归档正文 43168 字节完整保留、幻觉数字 0 次出现 | `v1.3.1` |
 | 1.3.0 | 2026-08-30 | 新增：**OpenAI 兼容适配层** `GET /v1/models` + `POST /v1/chat/completions`（非流式 + `chat.completion.chunk` SSE 流式）——BMO Chatbot 等 Obsidian 插件填 REST API URL `http://127.0.0.1:8788/v1` 即可直连 SmartVault RAG；末条 user 消息作检索 query、携带最近 6 轮历史、客户端 system 人设被忽略（以 RAG 接地约束为准）、参考来源以 Markdown 附录追加在回答末尾；协议契约对齐 BMO 源码（模型列表 `data[].id`、流式 `delta.content` + `finish_reason=="stop"` 停止帧 + `data: [DONE]`）；新增 14 项单测 `tests/test_openai_compat.py`（含 BMO 解析逻辑 Python 复刻回归） | `v1.3.0` |
 | 1.2.1 | 2026-08-30 | 修复：聊天界面流式回答中文乱码（ç¬è®° 式 mojibake）——LM Studio 的 `text/event-stream` 响应头不带 charset，requests 按 RFC 默认 ISO-8859-1 解码（`iter_lines(decode_unicode=True)`），UTF-8 中文增量全部变乱码（阻塞模式走 `resp.json()` 有编码探测故正常）；改为逐行取原始 bytes 显式 UTF-8 解码；新增 2 项单测 `tests/test_rag_client.py` | `v1.2.1` |
 | 1.2.0 | 2026-08-30 | 新增：**浏览器知识问答界面** `GET /ui`（`static/chat.html` 单页应用，零 CDN 依赖遵守离线隐私承诺）——SSE 流式逐字渲染回答、来源引用 chips（标题+路径+余弦距离）、`/status` 健康角标轮询；此前问答 API 仅能通过 curl / `/docs` 调试台 / 自写脚本调用 | `v1.2.0` |
@@ -161,7 +162,7 @@ mtime+size 未变 → 直接跳过（O(1)）→ 变了才算 md5 复核 → 确�
 
 ```bash
 # 日常验证（零三方依赖，任何机器可跑）
-python3 -m unittest discover -s tests          # 49 项单测（纯函数 + 客户端解码 + OpenAI 兼容层）
+python3 -m unittest discover -s tests          # 60 项单测（纯函数 + 客户端解码 + OpenAI 兼容层 + 归档保真性）
 python3 -m py_compile ingest_daemon.py rag_api.py scripts/build_index.py
 
 # 联调冒烟

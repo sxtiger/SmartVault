@@ -632,7 +632,7 @@ SYSTEM_PROMPT = """你是「SmartVault 智能仓库」的资深知识管理图�
 
 【整理规则】
 1. target_folder 必须优先从用户给出的“仓库目录树”中选择已有目录；目录树中确无合适目录时才允许新建，且最多二级深度；严禁使用“待处理笔记”或仓库根目录。
-2. optimized_content 遵守 Obsidian Markdown 规范：文件内不要重复一级标题（标题由文件名承担），用二级/三级标题分节，善用列表、表格与引用；保留草稿原文与附件转录中的全部关键事实，禁止凭空编造、禁止遗漏要点。
+2. optimized_content 遵守 Obsidian Markdown 规范：文件内不要重复一级标题（标题由文件名承担），用二级/三级标题分节，善用列表与引用；正文中的所有事实、数字、百分比、指标、人名、结论必须逐字来自草稿原文或附件转录，严禁编造原文不存在的任何数字、比例或事实；整理仅限标题层级、列表化与删除冗余空白，禁止缩写、扩写或补充原文没有的内容；草稿为对话/问答体时必须保持原有问答结构与措辞，禁止重组为摘要式笔记。
 3. 为正文涉及的关键概念、人物、书名、项目、技术名词添加 [[双链]]；目录树中的已有目录名可优先作为双链目标，以便沉淀知识网络。
 4. 附件的解析文本必须融入正文：以“> [!quote]- 附件：文件名”折叠引用块或独立小节呈现，冗长转录可提炼要点但不得丢失信息。
 5. 若提供了 ai_context.md 内容，必须严格遵守其中的「AI 处理规则」，并与「历史归档索引」中已有标签体系、双链风格保持一致。
@@ -642,7 +642,7 @@ SYSTEM_PROMPT = """你是「SmartVault 智能仓库」的资深知识管理图�
 
 def build_user_prompt(vault_name: str, draft_name: str, raw_md: str,
                       attach_blocks: List[str], tree_text: str, ctx_text: str,
-                      raw_max_chars: int) -> str:
+                      raw_max_chars: int, keep_original_content: bool = False) -> str:
     parts = [
         f"【当前仓库：{vault_name}｜目录树（优先归类到已有目录）】",
         tree_text or "（目录树为空）",
@@ -655,6 +655,14 @@ def build_user_prompt(vault_name: str, draft_name: str, raw_md: str,
         parts.append("【附件解析文本】\n" + "\n\n".join(attach_blocks))
     else:
         parts.append("【附件解析文本】\n（本篇草稿没有附件）")
+    if keep_original_content:
+        parts.append(
+            "【本篇为长文保守模式（最高优先级，覆盖前述一切规则）】\n"
+            f"本篇草稿共 {len(raw_md)} 字符，超过自动整理阈值。正文将由系统原样保留草稿原文，"
+            "你绝对禁止对正文做任何摘要、压缩、改写或重排。因此：\n"
+            "- optimized_content 字段必须返回空字符串 \"\"；\n"
+            "- 你只需认真完成 target_folder、new_filename、summary、tags 四个字段。"
+        )
     parts.append("请依据以上信息，直接输出符合契约的 JSON 对象。")
     return "\n\n".join(parts)
 
@@ -688,7 +696,8 @@ def parse_llm_json(raw: str, fallback_filename: str = "未命名笔记") -> Dict
         "new_filename": fname or fallback_filename,
         "summary": summary or "（模型未生成摘要）",
         "tags": sanitize_tags([str(t) for t in tags]),
-        "optimized_content": content or "（模型未返回正文，请人工整理）",
+        # 空 optimized_content 是合法值（长文保守模式），由 run_pipeline 回退为原文
+        "optimized_content": content,
     }
 
 
@@ -724,6 +733,9 @@ def choose_target_dir(vault: Vault, folder_str: str, proc: Dict[str, Any],
     max_depth = int(proc.get("max_folder_depth", 2))
     fallback = sanitize_component(proc.get("fallback_folder", "未分类")) or "未分类"
     parts = sanitize_folder_parts(folder_str)
+    # LLM 常把仓库名一并输出（如“智能笔记/BMO/Profiles”），剥离后再判深度，避免误回退未分类
+    while parts and parts[0] == vault.name:
+        parts = parts[1:]
     if parts and inbox_name not in parts:
         cand = vault.root.joinpath(*parts)
         try:
@@ -751,6 +763,31 @@ def unique_path(p: Path) -> Path:
         if not cand.exists():
             return cand
     return p.with_name(f"{p.stem} {int(time.time())}{p.suffix}")
+
+
+def backup_draft(vault_root: Path, md_path: Path, keep: int = 100) -> Optional[Path]:
+    """删除草稿前把原文备份到 vault 内 .smartvault/backup/，保留最近 keep 份。
+
+    归档成功即删草稿是不可逆操作；备份兜底 LLM 整理失真或误归档的恢复需求。
+    .smartvault 在 HIDDEN_DIR_NAMES 中（目录树扫描排除），也应配置进 RAG exclude_folders。
+    """
+    try:
+        bdir = vault_root / ".smartvault" / "backup"
+        bdir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        dest = unique_path(bdir / f"{stamp}_{md_path.name}")
+        shutil.copy2(str(md_path), str(dest))
+        olds = sorted([p for p in bdir.iterdir() if p.is_file()],
+                      key=lambda p: p.name, reverse=True)
+        for p in olds[keep:]:
+            try:
+                p.unlink()
+            except OSError:
+                pass
+        return dest
+    except Exception:  # noqa: BLE001 —— 备份失败不阻断归档，但必须留痕
+        LOG.exception("草稿备份失败（继续归档）：%s", md_path)
+        return None
 
 
 def rewrite_links(content: str, moved_map: Dict[str, str], subfolder: str) -> str:
@@ -849,19 +886,30 @@ def run_pipeline(cfg: Dict[str, Any], client: LLMClient, vault: Vault,
         attachments.append((ref, p))
         attach_blocks.append(f"◆ 附件「{p.name}」｜{kind}\n{text}")
 
-    # 3) 组装动态上下文
+    # 3) 组装动态上下文（长文保守模式：超过阈值时 LLM 只产元数据，正文原样保留，
+    #    杜绝长文压缩导致的丢内容与幻觉——见 v1.3.1 事故复盘）
     tree_text = scan_tree(vault.root, depth=int(cfg.get("tree_depth", 2)),
                           exclude_names=frozenset({inbox_name}))
     ctx_text = load_ai_context(vault.context_file, int(cfg["ai_context_max_chars"]))
+    rewrite_max = int(proc.get("rewrite_max_chars", 6000))
+    keep_original = len(raw) > rewrite_max
     user_prompt = build_user_prompt(vault.name, md_path.name, raw, attach_blocks,
                                     tree_text, ctx_text,
-                                    int(cfg["limits"]["raw_note_max_chars"]))
+                                    int(cfg["limits"]["raw_note_max_chars"]),
+                                    keep_original_content=keep_original)
 
     # 4) LLM 提炼（Strict JSON Schema 优先，失败自动回退纯提示词）
     raw_llm = client.chat([{"role": "system", "content": SYSTEM_PROMPT},
                            {"role": "user", "content": user_prompt}],
                           json_schema=NOTE_JSON_SCHEMA)
     meta = parse_llm_json(raw_llm, fallback_filename=md_path.stem)
+    if keep_original:
+        meta["optimized_content"] = raw  # 长文保守模式：正文一律用原文，无视 LLM 返回
+        LOG.info("长文保守模式（%d 字符 > %d）：正文保留原文，LLM 仅提供元数据",
+                 len(raw), rewrite_max)
+    else:
+        # 短文模式：LLM 万一未返回正文也回退原文，任何情况下不允许内容丢失
+        meta["optimized_content"] = meta["optimized_content"].strip() or raw
     LOG.info("LLM 提炼完成：目录=%s 文件名=%s 标签=%s", meta["target_folder"],
              meta["new_filename"], meta["tags"])
 
@@ -884,8 +932,10 @@ def run_pipeline(cfg: Dict[str, Any], client: LLMClient, vault: Vault,
             LOG.exception("附件移动失败（保留原处）：%s", src.name)
     meta["optimized_content"] = rewrite_links(meta["optimized_content"], moved_map, subfolder)
 
-    # 7) 写入终稿并清理草稿
+    # 7) 写入终稿、备份并清理草稿
     final_md.write_text(build_final_markdown(meta, now), encoding="utf-8")
+    if (backup := backup_draft(vault.root, md_path)) is not None:
+        LOG.info("草稿已备份：%s", backup.name)
     try:
         md_path.unlink()
     except OSError:
