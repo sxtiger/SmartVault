@@ -43,6 +43,23 @@ class TestAttachmentRefs(unittest.TestCase):
     def test_md_note_links_ignored(self):
         self.assertEqual(sv.find_attachment_refs("[[旧笔记.md]] [[另一篇]]"), [])
 
+    def test_html_img_tag_src_recognized(self):
+        # v1.6.3：Kindle/HTML 转 Markdown 产物的 <img src="..."> 引用（带路径前缀取 basename）
+        md = '<img src="附件/食谱-蒸海鲜什锦-1.png">\n<video src="演示.mp4"></video>'
+        self.assertEqual(sv.find_attachment_refs(md), ["食谱-蒸海鲜什锦-1.png", "演示.mp4"])
+
+    def test_html_src_variants(self):
+        md = ("<img src='单引号.png'> <img src=裸值.jpg> <IMG SRC=\"大写.PDF\"> "
+              '<img alt="说明" src="多属性.webp" width="300"> '
+              '<img src="URL%E7%BC%96%E7%A0%81.png">')
+        self.assertEqual(sv.find_attachment_refs(md),
+                         ["单引号.png", "裸值.jpg", "大写.PDF", "多属性.webp", "URL编码.png"])
+
+    def test_html_src_skip_external_and_data_uri(self):
+        md = ('<img src="https://example.com/a.png"> <img src="data:image/png;base64,iVBOR"> '
+              '<embed src="obsidian://open?v=x">')
+        self.assertEqual(sv.find_attachment_refs(md), [])
+
     def test_resolve_attachment_no_ext(self):
         with tempfile.TemporaryDirectory() as d:
             inbox = Path(d)
@@ -159,6 +176,26 @@ class TestRewriteLinks(unittest.TestCase):
         self.assertIn("[[白板 2.png|400]]", out)
         self.assertIn("[文档](attachments/白板 2.png)", out)
         self.assertIn("https://a.com/b.png", out)
+
+    def test_html_src_subfolder_and_no_subfolder(self):
+        # v1.6.3：HTML src 为相对路径语法，改写为 子目录/新名；引号风格保持原样
+        content = '<img src="附件/白板.png"> <img src=\'面板.png\'>'
+        out = sv.rewrite_links(content, {"白板.png": "白板 2.png"}, "附件")
+        self.assertIn('<img src="附件/白板 2.png">', out)
+        self.assertIn("<img src='面板.png'>", out)          # 未移动的附件不动
+        out2 = sv.rewrite_links(content, {"白板.png": "白板 2.png"}, "")
+        self.assertIn('<img src="白板 2.png">', out2)
+
+    def test_html_src_alt_same_value_not_corrupted(self):
+        # alt 与 src 同值时只改 src，前序属性不受影响
+        content = '<img alt="白板.png" src="白板.png">'
+        out = sv.rewrite_links(content, {"白板.png": "白板 2.png"}, "附件")
+        self.assertEqual(out, '<img alt="白板.png" src="附件/白板 2.png">')
+
+    def test_html_src_url_and_data_untouched(self):
+        content = '<img src="https://a.com/b.png"><img src="data:image/png;base64,xx">'
+        out = sv.rewrite_links(content, {"b.png": "c.png"}, "附件")
+        self.assertEqual(out, content)
 
 
 class TestUniquePath(unittest.TestCase):

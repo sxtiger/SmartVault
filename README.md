@@ -97,7 +97,7 @@ cp config.example.json config.json   # 真实配置不入 git（含个人路径�
 
 把 Markdown 草稿（可连同附件）拖入任意仓库的 `待处理笔记/`，守护进程会：
 
-1. 等文件写入稳定（防抖）并等引用附件到齐（`![[xxx.png]]` / `[t](xxx.pdf)`）
+1. 等文件写入稳定（防抖）并等引用附件到齐（`![[xxx.png]]` / `[t](xxx.pdf)` / HTML `<img src="附件/xxx.png">`）
 2. 按类型解析附件：图像→Vision OCR；音视频→whisper(Metal)；PDF→PyMuPDF；Office→python-docx/openpyxl/python-pptx；iWork→QuickLook/Preview.pdf
 3. 注入「仓库目录树 + ai_context.md（规则与历史索引）」让 LLM 生成 Strict JSON
    （`target_folder / new_filename / summary / tags / optimized_content`，全简体中文）
@@ -120,7 +120,7 @@ python ingest_daemon.py                         # 前台常驻
 
 ### 从旧 Obsidian 仓库迁移（文档 + 附件目录一起投）
 
-旧仓库的笔记连同 `附件/` 目录**整体拖入 `待处理笔记/` 即可**，无需拆散：守护进程递归监听子目录、递归按文件名定位附件——wikilink 无论带不带路径（`![[xx.png]]` 或 `![[附件/xx.png]]`）、标准链接 `[x](附件/a.pdf)` 都能解析。归档后附件统一收纳到目标目录的 `附件/` 子目录（v1.5.0 起），正文 wikilink 原位保留。
+旧仓库的笔记连同 `附件/` 目录**整体拖入 `待处理笔记/` 即可**，无需拆散：守护进程递归监听子目录、递归按文件名定位附件——wikilink 无论带不带路径（`![[xx.png]]` 或 `![[附件/xx.png]]`）、标准链接 `[x](附件/a.pdf)`、HTML 内嵌标签 `<img src="附件/xx.png">`（Kindle/HTML 转 Markdown 产物常用，v1.6.3 起支持）都能解析。归档后附件统一收纳到目标目录的 `附件/` 子目录（v1.5.0 起），正文 wikilink 原位保留。
 
 注意事项：
 
