@@ -240,6 +240,22 @@ class TestAppendAiContext(unittest.TestCase):
         self.assertIn("超短草稿", sv.SYSTEM_PROMPT)
         self.assertIn("弱关联", sv.SYSTEM_PROMPT)
 
+    def test_prompt_locks_link_terms_contract(self):
+        """v1.7.0：输出契约须含 link_terms，且严禁 LLM 自行改写正文双链。"""
+        self.assertIn("link_terms", sv.SYSTEM_PROMPT)
+        self.assertIn("link_terms", sv.NOTE_JSON_SCHEMA["required"])
+        self.assertIn("严禁在 optimized_content 中自行添加、改写或删除 [[双链]]", sv.SYSTEM_PROMPT)
+
+    def test_parse_llm_json_link_terms_tolerant(self):
+        """link_terms 解析：缺失→[]、字符串→拆分、列表→截前 8 个。"""
+        base = '{"target_folder":"A","new_filename":"B","summary":"s","tags":["t1","t2","t3"],"optimized_content":""'
+        m1 = sv.parse_llm_json(base + "}")
+        self.assertEqual(m1["link_terms"], [])
+        m2 = sv.parse_llm_json(base + ',"link_terms":"Modbus, RS485；北鼎蒸锅"}')
+        self.assertEqual(m2["link_terms"], ["Modbus", "RS485", "北鼎蒸锅"])
+        m3 = sv.parse_llm_json(base + ',"link_terms":["a","b","c","d","e","f","g","h","i","j"]}')
+        self.assertEqual(len(m3["link_terms"]), 8)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -35,7 +35,8 @@
     "max_folder_depth": 2,
     "fallback_folder": "未分类",
     "content_rewrite": false,
-    "rewrite_max_chars": 6000
+    "rewrite_max_chars": 6000,
+    "auto_wikilinks": true
   },
   "limits": {
     "raw_note_max_chars": 30000,

@@ -77,6 +77,53 @@ class TestAttachmentRefs(unittest.TestCase):
             self.assertIn("暂不支持自动解析", text)
             self.assertNotIn("binary", text)
 
+
+class TestApplyWikilinks(unittest.TestCase):
+    """v1.7.0 确定性双链注入：LLM 只给名词表，包裹由代码完成、逐字保真。"""
+
+    def test_basic_and_verbatim_fidelity(self):
+        raw = "通过 Modbus 协议接入 RS485 总线，北鼎蒸锅固件升级完成。"
+        out = sv.apply_wikilinks(raw, ["Modbus", "RS485", "北鼎蒸锅", "不存在的幻觉词"])
+        self.assertIn("[[Modbus]]", out)
+        self.assertIn("[[RS485]]", out)
+        self.assertIn("[[北鼎蒸锅]]", out)
+        # 逐字保真：去掉 [[ ]] 后与原文完全一致
+        self.assertEqual(out.replace("[[", "").replace("]]", ""), raw)
+
+    def test_hallucinated_term_is_noop(self):
+        raw = "正文里根本没有这个词。"
+        self.assertEqual(sv.apply_wikilinks(raw, ["幻觉词", "[[坏词]]", "a" * 25]), raw)
+
+    def test_no_double_wrap_and_ascii_boundary(self):
+        raw = "[[Modbus]] 已链接；RS4855继电器不是 RS485。"
+        out = sv.apply_wikilinks(raw, ["Modbus", "RS485"])
+        self.assertEqual(out.count("[[Modbus]]"), 1)      # 不重复包裹
+        self.assertNotIn("[[RS4855", out)                # 词边界防误伤
+        self.assertIn("[[RS485]]", out)
+
+    def test_protect_code_url_and_html(self):
+        raw = ("安装 `modbus-tk` 命令：\n\n```\npip install pymodbus\n```\n"
+               "参考 [文档](https://modbus.org/spec) 与 <img src=\"附件/Modbus图.png\">")
+        out = sv.apply_wikilinks(raw, ["pymodbus", "modbus-tk", "modbus", "Modbus图"])
+        self.assertNotIn("[[pymodbus]]", out)             # 代码围栏不注入
+        self.assertNotIn("[[modbus-tk]]", out)            # 行内代码不注入
+        self.assertNotIn("https://[[modbus", out)         # 链接 URL 不注入
+        self.assertNotIn("[[Modbus图", out)               # HTML src 属性不注入
+        # 禁区内容逐字保留
+        self.assertIn("pip install pymodbus", out)
+        self.assertIn("(https://modbus.org/spec)", out)
+
+    def test_long_term_priority(self):
+        raw = "部署 Home Assistant 后即可使用。"
+        out = sv.apply_wikilinks(raw, ["Assistant", "Home Assistant"])
+        self.assertIn("[[Home Assistant]]", out)
+        self.assertNotIn("[[Home [[Assistant]]]]", out)
+
+    def test_chinese_neighbor_chars_still_match(self):
+        # 中文邻接字符不阻断匹配（ASCII 边界仅约束字母数字）
+        raw = "这台北鼎蒸锅很好用。"
+        self.assertIn("[[北鼎蒸锅]]", sv.apply_wikilinks(raw, ["北鼎蒸锅"]))
+
     def test_resolve_attachment_no_ext(self):
         with tempfile.TemporaryDirectory() as d:
             inbox = Path(d)

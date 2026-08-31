@@ -100,11 +100,13 @@ cp config.example.json config.json   # 真实配置不入 git（含个人路径�
 1. 等文件写入稳定（防抖）并等引用附件到齐（`![[xxx.png]]` / `[t](xxx.pdf)` / HTML `<img src="附件/xxx.png">`）
 2. 按类型解析附件：图像→Vision OCR；音视频→whisper(Metal)；PDF→PyMuPDF；Office→python-docx/openpyxl/python-pptx；iWork→QuickLook/Preview.pdf
 3. 注入「仓库目录树 + ai_context.md（规则与历史索引）」让 LLM 生成 Strict JSON
-   （`target_folder / new_filename / summary / tags / optimized_content`，全简体中文）
+   （`target_folder / new_filename / summary / tags / link_terms / optimized_content`，全简体中文）
 4. 校验净化（拒绝越权目录、非法文件名），移动附件、写入带 YAML 属性的终稿、备份草稿到 `.smartvault/backup/`（保留最近 100 份）后删除，并自动清理收件箱内残留的空目录（如归档后空掉的 `附件/`）
 5. 追加历史索引到 `ai_context.md`，并用 `obsidian://open?...` 唤醒 Obsidian 打开新笔记
 
 **原文不可变（v1.4.0 起默认）**：归档笔记的正文**逐字保留草稿原文**，LLM 只负责提炼元数据（目录归类、文件名、摘要、标签、frontmatter），附件的 OCR/语音转录以折叠引用块附加在文末并标注「以原附件为准」——AI 幻觉再严重也改不动你的原文（v1.3.1 事故教训：LLM「整理」19941 字符长文曾丢失 94% 内容并编造数字）。如希望短文（语音转录、随手记）获得 AI 排版润色，可开启 `processing.content_rewrite: true`：此时不超过 `rewrite_max_chars`（默认 6000 字符）的草稿交由 LLM 整理（仍有逐字保真约束 + 草稿备份兜底），长文一律保留原文。
+
+**确定性双链注入（v1.7.0 起）**：正文中的关键专有名词（软件工具、通信协议、设备型号等）会被自动包裹 `[[双链]]` 建立知识网络——但**包裹由纯代码完成，LLM 只负责列名词清单**（`link_terms`，0~8 个、必须逐字摘自正文）：除新增的 `[[ ]]` 外不动任何字符（逐字保真可校验），LLM 幻觉编造正文没有的名词时正则匹配不到、自动忽略零副作用；代码围栏、行内代码、链接 URL、HTML 标签内的名词不会被注入（防命令/路径被污染）。配置 `processing.auto_wikilinks: false` 可整体关闭。
 
 调试命令：
 
