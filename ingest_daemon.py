@@ -245,8 +245,9 @@ def find_attachment_refs(md_text: str) -> List[str]:
 
     - 支持 ![[文件.png]]、[[文件.pdf|别名]] 与 standard [文本](路径) / ![](路径) 语法
     - 支持 HTML 内嵌标签 <img src="路径">（Kindle/HTML 转 Markdown 产物常用）
-    - 自动忽略：URL（http/obsidian:// 等带 scheme 的链接）、data: 内嵌资源、
-      .md 笔记链接、无扩展名双链
+    - 附件不限可解析类型：被链接即附件（.zip/.epub/.dwg 等任意扩展名均随笔记迁移），
+      仅排除 .md 笔记链接、无扩展名双链（Obsidian 笔记链接）
+    - 自动忽略：URL（http/obsidian:// 等带 scheme 的链接）、data: 内嵌资源
     """
     names: List[str] = []
 
@@ -255,7 +256,7 @@ def find_attachment_refs(md_text: str) -> List[str]:
         if not target:
             return
         ext = Path(target).suffix.lower()
-        if ext not in ATTACHMENT_EXTS:  # .md 笔记链接与裸双链不算附件
+        if not ext or ext == ".md":  # 无扩展名双链与 .md 是笔记链接，不算附件
             return
         if target not in names:
             names.append(target)
@@ -478,8 +479,13 @@ def dispatch_attachment(path: Path, cfg: Dict[str, Any]) -> Tuple[str, str]:
             kind, text = OFFICE_KIND_MAP[ext], extract_pptx(path)
         elif ext in IWORK_EXTS:
             kind, text = "iWork 预览（QuickLook）", extract_iwork(path)
-        else:  # .txt
+        elif ext == ".txt":
             kind, text = "纯文本附件", read_text_file(path)
+        else:
+            # v1.6.4：不可解析类型（.zip/.epub/.dwg 等）不读内容（避免二进制乱码
+            # 灌入 LLM），如实随笔记迁移，转录处仅标注占位
+            kind = "暂不支持解析"
+            text = f"（{path.name} 为「{ext}」类型，暂不支持自动解析；文件已随笔记归档至附件目录，请打开原文件查看）"
         LOG.info("附件解析完成 [%s] %s（%.1fs，%d 字符）", kind, path.name,
                  time.time() - started, len(text))
         return kind, _clip_text(text, int(cfg["limits"]["attachment_max_chars"]))
