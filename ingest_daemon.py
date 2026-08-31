@@ -232,13 +232,21 @@ WIKILINK_RE = re.compile(r"\[\[([^\[\]]+?)\]\]")
 # [text](path) / ![alt](path)，group(1)=方括号部分，group(2)=路径
 MD_LINK_RE = re.compile(r"(\[[^\[\]]*\])\(\s*([^()\s]+)(?:\s+\"[^\"]*\")?\s*\)")
 _URL_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*:")
+# HTML 内嵌资源标签（<img>/<audio>/<video>/<source>/<embed> 的 src 属性），
+# Kindle/HTML 转 Markdown 的产物常用此语法引用附件；双引号/单引号/裸值均兼容
+HTML_SRC_RE = re.compile(
+    r"""<(?:img|audio|video|source|embed)\b[^>]*?\bsrc\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)""",
+    re.IGNORECASE,
+)
 
 
 def find_attachment_refs(md_text: str) -> List[str]:
     """提取草稿中引用的附件文件名（按出现顺序去重）。
 
     - 支持 ![[文件.png]]、[[文件.pdf|别名]] 与 standard [文本](路径) / ![](路径) 语法
-    - 自动忽略：URL（http/obsidian:// 等带 scheme 的链接）、.md 笔记链接、无扩展名双链
+    - 支持 HTML 内嵌标签 <img src="路径">（Kindle/HTML 转 Markdown 产物常用）
+    - 自动忽略：URL（http/obsidian:// 等带 scheme 的链接）、data: 内嵌资源、
+      .md 笔记链接、无扩展名双链
     """
     names: List[str] = []
 
@@ -259,6 +267,11 @@ def find_attachment_refs(md_text: str) -> List[str]:
         raw = m.group(2).strip()
         if _URL_SCHEME_RE.match(raw) or raw.startswith("#"):
             continue  # 跳过 http(s)、obsidian://、mailto: 等外部链接
+        _add(unquote(Path(raw).name))
+    for m in HTML_SRC_RE.finditer(md_text or ""):
+        raw = m.group(1).strip("\"'").strip()
+        if not raw or _URL_SCHEME_RE.match(raw) or raw.startswith("#"):
+            continue  # 跳过 http(s)、data:image/... 内嵌资源等非收件箱附件
         _add(unquote(Path(raw).name))
     return names
 
@@ -891,7 +904,8 @@ def rewrite_links(content: str, moved_map: Dict[str, str], subfolder: str) -> st
     """附件改名/移入子目录后，把正文中引用改写为新相对路径。
 
     - wikilink（[[x.png]]）Obsidian 全局按名解析，仅当附件被重命名时改写目标名；
-    - standard link（[t](x.png)）是相对路径语法，统一改写为 子目录/新名。
+    - standard link（[t](x.png)）与 HTML src（<img src="x.png">）是相对路径语法，
+      统一改写为 子目录/新名（引号风格保持原样）。
     """
     if not moved_map:
         return content
@@ -919,7 +933,24 @@ def rewrite_links(content: str, moved_map: Dict[str, str], subfolder: str) -> st
             return f"{m.group(1)}({rel})"
         return m.group(0)
 
-    return MD_LINK_RE.sub(rep_mdlink, content)
+    content = MD_LINK_RE.sub(rep_mdlink, content)
+
+    def rep_htmlsrc(m: "re.Match[str]") -> str:
+        quoted = m.group(1)
+        q = quoted[0] if quoted[:1] in ('"', "'") else ""
+        raw = quoted.strip("\"'").strip()
+        if not raw or _URL_SCHEME_RE.match(raw) or raw.startswith("#"):
+            return m.group(0)  # 外部 URL / data: 内嵌资源 / 锚点不动
+        name = Path(unquote(raw)).name
+        if name in moved_map:
+            new = moved_map[name]
+            rel = f"{subfolder}/{new}" if subfolder else new
+            # 按 group(1) 区间精确重组，避免 alt="同值" 时误伤前序属性
+            s, e = m.start(1) - m.start(0), m.end(1) - m.start(0)
+            return m.group(0)[:s] + q + rel + q + m.group(0)[e:]
+        return m.group(0)
+
+    return HTML_SRC_RE.sub(rep_htmlsrc, content)
 
 
 def wake_obsidian(vault_name: str, rel_path: str) -> None:
