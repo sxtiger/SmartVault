@@ -60,6 +60,23 @@ class TestAttachmentRefs(unittest.TestCase):
               '<embed src="obsidian://open?v=x">')
         self.assertEqual(sv.find_attachment_refs(md), [])
 
+    def test_any_ext_linked_treated_as_attachment(self):
+        # v1.6.4：被链接即附件——不可解析类型（zip/epub/dwg…）同样随笔记迁移
+        md = "[[压缩包.zip]] [电子书](电子书.epub) <img src=\"附件/图纸.dwg\"> [白板](画布.canvas)"
+        self.assertEqual(sv.find_attachment_refs(md),
+                         ["压缩包.zip", "电子书.epub", "画布.canvas", "图纸.dwg"])
+
+    def test_dispatch_unsupported_ext_placeholder(self):
+        # v1.6.4：未知类型不读内容（防二进制乱码灌入 LLM），返回占位说明
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "归档资料.zip"
+            p.write_bytes(b"\x50\x4b\x03\x04binary-garbage")
+            kind, text = sv.dispatch_attachment(
+                p, {"vision": {}, "whisper": {}, "limits": {"attachment_max_chars": 1000}})
+            self.assertEqual(kind, "暂不支持解析")
+            self.assertIn("暂不支持自动解析", text)
+            self.assertNotIn("binary", text)
+
     def test_resolve_attachment_no_ext(self):
         with tempfile.TemporaryDirectory() as d:
             inbox = Path(d)

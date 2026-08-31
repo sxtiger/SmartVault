@@ -8,6 +8,7 @@
 
 | 版本 | 日期 | 变更摘要 | git tag |
 |---|---|---|---|
+| 1.6.4 | 2026-08-31 | 功能（用户需求：附件中存在非图片/音视频/PDF/Office 等可解析类型之外的文件——如 .zip/.epub/.dwg——但被笔记链接，须如实随笔记迁移；孤立文件除外）：① **被链接即附件**——`find_attachment_refs` 的 `_add` 由扩展名白名单（ATTACHMENT_EXTS）改为排除法：有扩展名且非 `.md` 的引用一律视为附件（.md 与无扩展名双链仍是笔记链接，URL/data: 内嵌仍跳过），任意格式文件随笔记迁入目标目录 `附件/` 子目录；② **不可解析类型不读内容**——`dispatch_attachment` 原 else 分支把未知扩展名当纯文本读（二进制乱码会灌入 LLM prompt），现改为返回「暂不支持解析」占位（如实标注「文件已随笔记归档至附件目录」，0.0s 秒过），转录块仅提示打开原文件；③ 未被任何笔记引用的孤立文件维持现状保留收件箱待人工处置。新增 2 项单测（共 86 项全绿）；E2E：草稿 md 链接 `附件/配置备份包.zip` 全管线验证（暂不支持解析 0.0s → 归档 69.6s → zip 落位 `配置备份/附件/` → 正文引用保留 → 文末折叠块如实标注；测试产物已清理）；README 迁移指南 + 本文档模块地图/单测计数同步 | `v1.6.4` |
 | 1.6.3 | 2026-08-31 | 修复（E2E 取证：北鼎蒸锅等 5 篇 Kindle 导入笔记归档后正文引用的 45 个附件全部滞留收件箱——笔记用 HTML `<img src="附件/x.png">` 引用图片，Obsidian 能正常渲染但 `find_attachment_refs` 只识别 wikilink / md 链接两种语法，refs 为空导致附件不解析不迁移；微波烤箱 86 个引用归档日志「附件转录 0 份」且无任何等待/告警即为直接证据）：① **HTML src 引用识别**——新增 `HTML_SRC_RE`（`<img>/<audio>/<video>/<source>/<embed>` 的 src 属性，双引号/单引号/裸值/大小写/URL 编码全兼容），`find_attachment_refs` 提取时取 basename 并跳过带 scheme 的 URL 与 `data:` 内嵌资源；`rewrite_links` 新增 `rep_htmlsrc` 同步改写（相对路径语义，改写为 子目录/新名，引号风格保持，按 group 区间精确重组防 `alt` 同值误伤）；② **存量数据一次性修复**——修复脚本复用归档逻辑对全 vault 扫描：45 个被引用附件迁移至对应笔记 `附件/` 子目录（正文 src 字节级不变，秒级完成不重跑 LLM/OCR），20 个无笔记引用的孤儿附件保留收件箱待人工处置；③ E2E：新草稿带 HTML img 引用 2 张图全管线验证（附件解析完成 ×2 → 归档 54.7s → 附件落位 `厨房设备/附件/` → 正文引用原样保留）。新增 6 项单测（共 84 项全绿）；README 迁移指南附件语法说明同步 | `v1.6.3` |
 | 1.6.2 | 2026-08-30 | 调优（Qwen3 双模式推理参数；取证结论：LM Studio server 端加载参数已最优——32768 ctx / parallel 1 / GPU 满载，真正瓶颈在请求参数层——此前仅发 temperature=0.3，top_p/top_k 落 LM Studio 默认值 1.0/40 属非官方组合，且 Qwen3 thinking 全程开启每请求白烧 200~2000 推理 token；LM Studio /v1 实测不支持 chat_template_kwargs / enable_thinking 请求参数，`/no_think` 软开关是唯一思考控制通道，实测同请求 16.2s→1.25s）：① **采样参数显式下发**——`LLMClient` / `LMStudioClient` 请求体新增 top_p / top_k；归档侧对齐 Qwen3 官方 thinking 模式推荐值 temp 0.6 / top_p 0.95 / top_k 20（`lm_studio.temperature` 0.3→0.6，新增 `lm_studio.top_p / top_k / thinking`）；② **问答侧默认关闭思考**——新增 `apply_thinking_switch()`（末条 user 消息追加 `/no_think`，Qwen3 官方 chat template 据此注入空 think 块；深拷贝不污染原消息，两模块同实现各自内聚）；问答采样取官方非 thinking 推荐值 temp 0.7 / top_p 0.8 / top_k 20（新增 `rag.chat_temperature / chat_top_p / chat_top_k / chat_thinking`，chat_ 前缀避免与检索 top_k 混淆、不回读 lm_studio.temperature）；归档侧默认 thinking=true（质量优先，可配置关）。新增 5 项单测（共 78 项全绿）；E2E 实测：1474 字符草稿归档 15.8s（旧同量级输入 59.6~73.5s）且分类正确、正文逐字保留；RAG 事实问答全链路 5.6s（旧 30s+）答对并正确引用来源、`/no_think` 零泄漏；README LM Studio 调优说明 + 本文档配置表/模块地图/已知问题 7/单测计数同步 | `v1.6.2` |
 | 1.6.1 | 2026-08-30 | 修复（E2E 取证：claude_pro.md 内容与 Obsidian 无关却归入「Obsidian指南」）：① **重归档自愈**——`append_ai_context()` 追加前经 `_drop_stale_ctx_entries()` 按文件名移除旧历史条目：旧条目随 Prompt 注入会形成「历史一致性」锚定（SYSTEM_PROMPT 规则 5 要求与历史索引保持一致），使误归档笔记移回收件箱后仍被 LLM 沿用旧目录、纠错失效（实测两次重归档均跟随旧目录），且 append-only 堆积重复条目；现同 stem 仅保留最新一条，**误归档纠正=移回收件箱即可**（无需再手动删 ai_context 条目）；与 `prune_ai_context_entries`（死链清理）正交互补；② **超短草稿防蹭目录**——SYSTEM_PROMPT 新增规则 8：正文不足约 200 字符的链接收藏/账号信息/碎片备忘须按实际用途与关键实体（站点/工具/邮箱/账号）归类，禁止凭个别词语的弱关联塞入已有目录。新增 3 项单测（`TestAppendAiContext`，共 73 项）；README「分类体系全自动」+ 本文档 How-to/管线时序/模块地图同步 | `v1.6.1` |
@@ -69,7 +70,7 @@
 | 数据模型 | `Vault` | name / root / inbox / context_file 四元组；唤醒 URI 依赖 name |
 | 净化校验 | `sanitize_filename` `sanitize_folder_parts` `sanitize_tags` | 非法字符、`..` 穿越拦截、tag 规范化去重 |
 | 目标目录 | `choose_target_dir` | 已存在目录优先 → 深度 ≤ max_folder_depth 才允许新建整条链路 → 兜底 fallback；收件箱与根目录永远禁止 |
-| 引用解析 | `find_attachment_refs` `resolve_attachment` `rewrite_links` | 提取 `![[x]]` 嵌入、标准 md 附件链接与 HTML `<img src>` 等内嵌标签（Kindle/HTML 转换产物常用；跳过 URL/锚点/data: 内嵌/md 笔记）→ 收件箱定位（无扩展名自动补全）→ 附件改名后同步改写正文（HTML src 按相对路径语义改写，引号风格保持） |
+| 引用解析 | `find_attachment_refs` `resolve_attachment` `rewrite_links` | 提取 `![[x]]` 嵌入、标准 md 附件链接与 HTML `<img src>` 等内嵌标签（Kindle/HTML 转换产物常用）→ 被链接即附件：任意扩展名（.zip/.epub/.dwg 等）均随笔记迁移，仅排除 .md/无扩展名笔记链接与 URL/data: 内嵌 → 收件箱定位（无扩展名自动补全常见类型）→ 附件改名后同步改写正文（HTML src 按相对路径语义改写，引号风格保持） |
 | 多模态解析 | `parse_attachment`（按扩展名分发） | png/jpg…→ocrmac(Vision)；音视频→mlx-whisper（自动回退 openai-whisper）；pdf→PyMuPDF；docx/xlsx/pptx→对应库；pages/numbers/key→包内 QuickLook/Preview.pdf |
 | 上下文 | `scan_tree` `load_ai_context` `_drop_stale_ctx_entries` | 目录树（排除隐藏目录/收件箱，限 tree_depth 层）；ai_context 超长时保头尾智能截断；追加历史条目前按文件名移除同 stem 旧条目（重归档自愈，防旧目录经 Prompt 锚定 LLM、防条目重复堆积，仅匹配标准生成行、人工条目保守不动） |
 | LLM | `LLMClient` `SYSTEM_PROMPT` `parse_llm_json` `apply_thinking_switch` | 优先 `response_format: json_schema` 结构化输出，LM Studio 400 时自动降级（上下文超限除外——识别为独立错误并给出重载指引，不做无谓重发）；鲁棒解析（去围栏/截噪声/tags 类型容错）；采样参数显式下发（Qwen3 thinking 模式推荐值），thinking=false 时经 `/no_think` 软开关跳过思考 |
@@ -188,7 +189,7 @@ mtime+size 未变 → 直接跳过（O(1)）→ 变了才算 md5 复核 → 确�
 
 ```bash
 # 日常验证（零三方依赖，任何机器可跑）
-python3 -m unittest discover -s tests          # 84 项单测（纯函数 + 客户端解码 + OpenAI 兼容层 + 归档保真性 + ai_context 清理 + 空目录清理 + 重归档自愈 + Qwen3 采样调优 + HTML src 附件引用）
+python3 -m unittest discover -s tests          # 86 项单测（纯函数 + 客户端解码 + OpenAI 兼容层 + 归档保真性 + ai_context 清理 + 空目录清理 + 重归档自愈 + Qwen3 采样调优 + HTML src 附件引用 + 任意类型附件随迁）
 python3 -m py_compile ingest_daemon.py rag_api.py scripts/build_index.py
 
 # 联调冒烟
