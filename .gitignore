@@ -5,6 +5,7 @@ config.json
 *.pem
 *.key
 secrets/
+ai_context.md
 
 # ===== Python =====
 __pycache__/
