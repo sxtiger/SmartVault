@@ -82,9 +82,11 @@ NOTE_JSON_SCHEMA: Dict[str, Any] = {
         "new_filename": {"type": "string", "description": "新文件名，不含 .md 扩展名与路径分隔符"},
         "summary": {"type": "string", "description": "80~120 字摘要，必须严格取材于草稿原文，禁止出现原文没有的数字或事实"},
         "tags": {"type": "array", "items": {"type": "string"}, "minItems": 3, "maxItems": 5},
+        "link_terms": {"type": "array", "items": {"type": "string"}, "maxItems": 8,
+                       "description": "正文中实际出现的关键专有名词，逐字摘自正文，供系统确定性包裹双链"},
         "optimized_content": {"type": "string", "description": "排版后的完整 Markdown 正文"},
     },
-    "required": ["target_folder", "new_filename", "summary", "tags", "optimized_content"],
+    "required": ["target_folder", "new_filename", "summary", "tags", "link_terms", "optimized_content"],
     "additionalProperties": False,
 }
 
@@ -108,7 +110,8 @@ CONFIG_DEFAULTS: Dict[str, Any] = {
                 "openai_model": "small", "language": "zh"},
     "processing": {"debounce_seconds": 8, "quiet_seconds": 3, "attachment_wait_timeout": 30,
                    "attachments_subfolder": "附件", "allow_new_folder": True, "max_folder_depth": 2,
-                   "fallback_folder": "未分类", "content_rewrite": False, "rewrite_max_chars": 6000},
+                   "fallback_folder": "未分类", "content_rewrite": False, "rewrite_max_chars": 6000,
+                   "auto_wikilinks": True},
     "limits": {"raw_note_max_chars": 30000, "attachment_max_chars": 12000},
     "rag": {"enabled": True, "embedding_model_path": "models/bge-small-zh-v1.5",
             "embedding_device": "mps", "chroma_dir": "data/chroma", "collection_name": "smartvault",
@@ -707,11 +710,12 @@ SYSTEM_PROMPT = """你是「SmartVault 智能仓库」的资深知识管理图�
    - "summary": 字符串，80~120 字的内容摘要；摘要中的事实与数字必须严格取材于草稿原文，严禁出现原文没有的数字、比例或结论。
    - "tags": 字符串数组，恰好 3~5 个主题标签，不带 # 号，不含空格。
    - "optimized_content": 字符串，整理排版后的完整 Markdown 正文；仅当系统未声明“原文保留模式”时才需要填写，声明后必须为空字符串 ""。
+   - "link_terms": 字符串数组，正文中实际出现的关键专有名词（软件工具、通信协议、设备型号、技术名词、书名项目等），0~8 个、每个不超过 24 字符，必须逐字摘自草稿原文；系统将以确定性代码据此在正文上包裹 [[双链]]（不改任何其他字符）。
 
 【整理规则】
 1. target_folder 必须优先从用户给出的“仓库目录树”中选择已有目录；目录树中确无合适目录时，须依据笔记主题**新建简洁的一级目录**（2~6 个字，如“开发环境”“AI 工具”“网络工具”），让分类体系随归档自然生长，同主题笔记后续复用同一目录；最多二级深度；严禁使用“待处理笔记”、仓库根目录，以及“未分类”“笔记”“文档”“其他”等无信息量的目录名。
 2. optimized_content 遵守 Obsidian Markdown 规范：文件内不要重复一级标题（标题由文件名承担），用二级/三级标题分节，善用列表与引用；正文中的所有事实、数字、百分比、指标、人名、结论必须逐字来自草稿原文或附件转录，严禁编造原文不存在的任何数字、比例或事实；整理仅限标题层级、列表化与删除冗余空白，禁止缩写、扩写或补充原文没有的内容；草稿为对话/问答体时必须保持原有问答结构与措辞，禁止重组为摘要式笔记。
-3. 为正文涉及的关键概念、人物、书名、项目、技术名词添加 [[双链]]；目录树中的已有目录名可优先作为双链目标，以便沉淀知识网络。
+3. 双链注入由系统代码完成：你只需在 link_terms 列出正文中实际出现的关键专有名词（软件工具、通信协议、设备型号、技术名词、书名项目，0~8 个，目录树已有目录名对应的实体优先）；严禁在 optimized_content 中自行添加、改写或删除 [[双链]]。
 4. 附件的解析文本必须融入正文：以“> [!quote]- 附件：文件名”折叠引用块或独立小节呈现，冗长转录可提炼要点但不得丢失信息。
 5. 若提供了 ai_context.md 内容，必须严格遵守其中的「AI 处理规则」，并与「历史归档索引」中已有标签体系、双链风格保持一致。
 6. 全部输出内容（target_folder、new_filename、summary、tags、optimized_content）一律使用简体中文；专有名词、代码、命令、英文缩写、文件名与扩展名除外。
@@ -740,7 +744,8 @@ def build_user_prompt(vault_name: str, draft_name: str, raw_md: str,
             f"本篇草稿共 {len(raw_md)} 字符，正文将由系统原样保留草稿原文，"
             "你绝对禁止对正文做任何摘要、压缩、改写或重排。因此：\n"
             "- optimized_content 字段必须返回空字符串 \"\"；\n"
-            "- 你只需认真完成 target_folder、new_filename、summary、tags 四个字段，"
+            "- 你只需认真完成 target_folder、new_filename、summary、tags、link_terms 五个字段，"
+            "其中 link_terms 供系统在保留的原文上以确定性代码包裹双链（不改任何其他字符）；"
             "其中 summary 也必须严格取材于原文，禁止出现原文没有的数字、比例或事实。"
         )
     parts.append("请依据以上信息，直接输出符合契约的 JSON 对象。")
@@ -770,12 +775,17 @@ def parse_llm_json(raw: str, fallback_filename: str = "未命名笔记") -> Dict
     if isinstance(tags, str):
         tags = [t for t in re.split(r"[,，;；\s]+", tags) if t]
     content = _strip_code_fence(str(obj.get("optimized_content") or ""))
+    link_terms = obj.get("link_terms") or []
+    if isinstance(link_terms, str):
+        link_terms = [t for t in re.split(r"[,，;；\n]+", link_terms) if t.strip()]
+    link_terms = [t.strip() for t in link_terms if str(t).strip()][:8]
 
     return {
         "target_folder": folder,
         "new_filename": fname or fallback_filename,
         "summary": summary or "（模型未生成摘要）",
         "tags": sanitize_tags([str(t) for t in tags]),
+        "link_terms": link_terms,
         # 空 optimized_content 是合法值（长文保守模式），由 run_pipeline 回退为原文
         "optimized_content": content,
     }
@@ -984,6 +994,42 @@ def _wait_file_stable(path: Path, checks: int = 10, interval: float = 1.0) -> bo
     return last > 0
 
 
+# 双链注入的禁区：代码围栏、行内代码、md 链接 URL、HTML 标签（含 src 属性）
+_WIKILINK_PROTECT_RE = re.compile(r"```.*?```|`[^`\n]*`|\]\([^)\s]*\)|<[^>\n]*>", re.S)
+
+
+def apply_wikilinks(text: str, terms: List[str]) -> str:
+    """确定性双链注入（v1.7.0）：把正文中出现的专有名词用 [[ ]] 包裹。
+
+    LLM 只提供名词清单（link_terms），包裹由本函数以纯正则完成——除新增的
+    [[ ]] 外不动任何字符（逐字保真可校验）；LLM 幻觉出正文没有的名词时
+    正则匹配不到，自动忽略、零副作用。代码围栏/行内代码/链接 URL/HTML
+    标签属禁区不注入；ASCII 词边界防止 RS485 误伤 RS4855；lookaround 防
+    重复包裹已有 [[x]]；长词优先替换防止短词破坏长词。
+    """
+    if not text or not terms:
+        return text
+    cleaned: List[str] = []
+    for t in terms:
+        t = str(t).strip().strip("[]|").strip()
+        if 1 <= len(t) <= 24 and "\n" not in t and t not in cleaned:
+            cleaned.append(t)
+    if not cleaned:
+        return text
+    cleaned.sort(key=len, reverse=True)          # 长词优先
+    parts = _WIKILINK_PROTECT_RE.split(text)     # 禁区被剔除
+    guards = _WIKILINK_PROTECT_RE.findall(text)  # 禁区原样放回
+    rebuilt: List[str] = []
+    for i, seg in enumerate(parts):
+        for t in cleaned:
+            seg = re.sub(rf"(?<![A-Za-z0-9_\[]){re.escape(t)}(?![A-Za-z0-9_\]])",
+                         lambda _m, _t=t: f"[[{_t}]]", seg)
+        rebuilt.append(seg)
+        if i < len(guards):
+            rebuilt.append(guards[i])
+    return "".join(rebuilt)
+
+
 def build_preserved_content(raw_md: str, attach_blocks: List[str]) -> str:
     """原文保留模式的正文组装：草稿原文逐字保留；附件转录以折叠引用块附加文末。
 
@@ -1087,6 +1133,15 @@ def run_pipeline(cfg: Dict[str, Any], client: LLMClient, vault: Vault,
         except Exception:  # noqa: BLE001
             LOG.exception("附件移动失败（保留原处）：%s", src.name)
     meta["optimized_content"] = rewrite_links(meta["optimized_content"], moved_map, subfolder)
+
+    # 6.5) 确定性双链注入（v1.7.0）：LLM 只提供名词表，包裹由代码完成，逐字保真
+    if proc.get("auto_wikilinks", True) and meta.get("link_terms"):
+        body = meta["optimized_content"]
+        linked = apply_wikilinks(body, meta["link_terms"])
+        if linked != body:
+            LOG.info("双链注入：新增 %d 处 [[双链]]（确定性包裹，正文其余字符逐字不变）",
+                     linked.count("[[") - body.count("[["))
+        meta["optimized_content"] = linked
 
     # 7) 写入终稿、备份并清理草稿
     final_md.write_text(build_final_markdown(meta, now), encoding="utf-8")
