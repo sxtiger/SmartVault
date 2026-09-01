@@ -7,13 +7,15 @@ SmartVault / 智能仓库 —— 模块 A：自动化摄入与归档守护进程
   1. 读取外部 config.json，注册多个 Obsidian Vault，用 watchdog 同时监听每个
      Vault 内部统一名称的「待处理笔记」收件箱目录。
   2. 实时捕获拖入的 Markdown 草稿及附件，按扩展名路由多模态解析：
-       图像   (.png/.jpg/.jpeg/.heic...)   -> ocrmac（macOS Vision / Neural Engine）
+       图像   (.png/.jpg/.jpeg/.heic...)   -> ocrmac（macOS Vision / Neural Engine）；
+                                              auto 模式下 Vision 未识别到文字时 RapidOCR 兜底（手写）
        音视频 (.mp3/.m4a/.wav/.mp4/.mov..) -> mlx-whisper（Metal）/ openai-whisper（备选）
        PDF    (.pdf)                       -> PyMuPDF(fitz) 文本层；扫描页（中文手写）-> RapidOCR
        Office (.docx/.xlsx/.pptx)          -> python-docx / openpyxl / python-pptx
        iWork  (.pages/.numbers/.key)       -> 解剖 Zip 包/包目录 -> QuickLook/Preview.pdf -> fitz
   3. 动态扫描仓库目录树（一/二级）+ 读取 ai_context.md 人设与历史索引，注入 Prompt，
      呼叫本地 LM Studio 生成 Strict JSON（全字段纯简体中文约束）。
+      草稿正文最前可放 ```smartvault 指令块（作者对本篇的归档要求），注入 Prompt 优先满足。
   4. 生成 YAML 属性 + 排版正文，移动附件与笔记至目标目录，清理草稿，
      反向追加 ai_context.md 历史索引，最后通过 obsidian:// URI 唤醒 Obsidian。
 
@@ -106,7 +108,8 @@ CONFIG_DEFAULTS: Dict[str, Any] = {
     "tree_depth": 2,
     "obsidian": {"wake_enabled": True},
     "vision": {"language_preference": ["zh-Hans", "en-US"]},
-    "ocr": {"engine": "rapidocr", "pdf_dpi": 200, "pdf_max_ocr_pages": 20, "pdf_min_text_chars": 20},
+    "ocr": {"engine": "rapidocr", "image_engine": "auto", "pdf_dpi": 200,
+            "pdf_max_ocr_pages": 20, "pdf_min_text_chars": 20},
     "whisper": {"backend": "auto", "mlx_model": "mlx-community/whisper-large-v3-turbo",
                 "openai_model": "small", "language": "zh"},
     "processing": {"debounce_seconds": 8, "quiet_seconds": 3, "attachment_wait_timeout": 30,
@@ -311,16 +314,66 @@ def _clip_text(text: str, limit: int) -> str:
     return text[:limit] + "\n……（内容超长，已截断）"
 
 
-def ocr_image(path: Path, vision_cfg: Dict[str, Any]) -> str:
-    """图像 OCR：macOS Vision 框架（ocrmac），由 M4 Neural Engine 零延迟执行。"""
+def _vision_image(path: Path, vision_cfg: Dict[str, Any]) -> str:
+    """Vision OCR 原始文本（空串 = 未识别到文字）；占位说明由调用方统一生成。"""
     from ocrmac import ocrmac
     langs = vision_cfg.get("language_preference", ["zh-Hans", "en-US"])
     annotations = ocrmac.OCR(str(path), language_preference=langs).recognize()
     lines = []
     for item in annotations:
         lines.append(item[0] if isinstance(item, (tuple, list)) else str(item))
-    text = "\n".join(x.strip() for x in lines if x and x.strip())
-    return text or "（Vision OCR 未识别到文字，可能为纯图形图片）"
+    return "\n".join(x.strip() for x in lines if x and x.strip())
+
+
+def ocr_image(path: Path, vision_cfg: Dict[str, Any]) -> str:
+    """图像 OCR：macOS Vision 框架（ocrmac），由 M4 Neural Engine 零延迟执行。"""
+    return _vision_image(path, vision_cfg) or "（Vision OCR 未识别到文字，可能为纯图形图片）"
+
+
+def _rapidocr_image(path: Path) -> str:
+    """RapidOCR 识别整张图片（PP-OCRv6，中文手写友好）；返回原始文本（空串 = 无文字）。"""
+    result = _get_rapidocr_engine()(str(path))
+    texts = [str(x).strip() for x in (getattr(result, "txts", None) or [])
+             if x and str(x).strip()]
+    return "\n".join(texts)
+
+
+def extract_image(path: Path, cfg: Dict[str, Any]) -> Tuple[str, str]:
+    """图像 OCR 引擎路由（v1.9.0）：ocr.image_engine = auto（默认）/ vision / rapidocr / off。
+
+    auto：Vision 先识别（印刷体与规整手写效果好、Neural Engine 零延迟），无结果或异常时
+    RapidOCR 兜底——潦草中文手写 Vision 可能整体识别失败，PP-OCRv6 更稳；纯图形图片两引擎
+    都为空也只多花约 0.3s。任何失败降级为占位说明，不中断归档流水线。
+    注意：HEIC 仅 Vision 支持（OpenCV 不读 HEIC），HEIC 手写请保持 auto / vision 模式。
+    """
+    ocr_cfg = cfg.get("ocr") or {}
+    engine = str(ocr_cfg.get("image_engine", "auto")).strip().lower()
+    if engine in ("off", "disable", "false"):
+        return "图像 OCR（已关闭）", "（图像 OCR 已关闭（ocr.image_engine=off），请打开原图片查看）"
+    if engine == "vision":
+        return "图像 OCR（Vision）", ocr_image(path, cfg.get("vision") or {})
+    if engine == "rapidocr":
+        try:
+            text = _rapidocr_image(path)
+        except RuntimeError as e:  # 引擎不可用 → 如实占位（不中断归档）
+            return "图像 OCR（RapidOCR）", f"（{e}，请打开原图片查看）"
+        return "图像 OCR（RapidOCR）", (text or "（RapidOCR 未识别到文字，可能为纯图形图片）")
+    # auto：Vision 优先，失灵（无结果/异常）时 RapidOCR 兜底
+    try:
+        vision_text = _vision_image(path, cfg.get("vision") or {})
+    except Exception as e:  # noqa: BLE001 —— Vision 失败不放弃，交 RapidOCR 救场
+        LOG.warning("Vision OCR 失败（交 RapidOCR 兜底）：%s", e)
+        vision_text = ""
+    if vision_text:
+        return "图像 OCR（Vision）", vision_text
+    try:
+        r_text = _rapidocr_image(path)
+    except Exception as e:  # noqa: BLE001 —— 两引擎均失败：如实占位，不中断归档
+        LOG.warning("RapidOCR 图像兜底失败：%s", e)
+        return "图像 OCR（Vision→RapidOCR）", f"（Vision 未识别到文字，RapidOCR 兜底亦失败：{e}，请打开原图片查看）"
+    if r_text:
+        return "图像 OCR（Vision→RapidOCR 兜底）", r_text
+    return "图像 OCR（Vision→RapidOCR）", "（Vision 与 RapidOCR 均未识别到文字，可能为纯图形图片）"
 
 
 _OPENAI_WHISPER_MODEL: Dict[str, Any] = {}
@@ -530,7 +583,7 @@ def dispatch_attachment(path: Path, cfg: Dict[str, Any]) -> Tuple[str, str]:
     try:
         started = time.time()
         if ext in IMAGE_EXTS:
-            kind, text = "图像 OCR（Vision）", ocr_image(path, cfg["vision"])
+            kind, text = extract_image(path, cfg)
         elif ext in MEDIA_EXTS:
             kind, text = "音视频转录（whisper）", transcribe_media(path, cfg["whisper"])
         elif ext == ".pdf":
@@ -781,20 +834,75 @@ SYSTEM_PROMPT = """你是「SmartVault 智能仓库」的资深知识管理图�
 5. 若提供了 ai_context.md 内容，必须严格遵守其中的「AI 处理规则」，并与「历史归档索引」中已有标签体系、双链风格保持一致。
 6. 全部输出内容（target_folder、new_filename、summary、tags、optimized_content）一律使用简体中文；专有名词、代码、命令、英文缩写、文件名与扩展名除外。
 7. 清除草稿痕迹：删除“待处理”“测试”等临时字样与冗余空白，输出即终稿。
-8. 超短草稿（正文不足约 200 字符，多为链接收藏、账号信息、碎片备忘）语义信号弱：必须依据笔记的实际用途与关键实体（链接指向的站点/工具、邮箱、账号、备忘主题）判断归类，不得凭个别词语的弱关联塞入已有目录，确无贴切目录时新建；这些关键信息须如实写入 summary 与 tags。"""
+8. 超短草稿（正文不足约 200 字符，多为链接收藏、账号信息、碎片备忘）语义信号弱：必须依据笔记的实际用途与关键实体（链接指向的站点/工具、邮箱、账号、备忘主题）判断归类，不得凭个别词语的弱关联塞入已有目录，确无贴切目录时新建；这些关键信息须如实写入 summary 与 tags。
+9. 若提供了【作者对本篇草稿的特别要求】，在不违反输出契约、事实忠实性与安全校验的前提下必须优先满足：作者指定的目标目录、文件名、标签与摘要侧重要求优先于 ai_context 规则与一般整理规则（作者指定的目录不存在时可按其指定名新建，仍受目录深度与禁用目录名约束）；确有无法满足或相互冲突的要求时按契约默认规则处理并在 summary 中如实反映，不得编造。"""
+
+# ------------------------------------------------------------------ 草稿指令块（v1.9.0）
+_FRONTMATTER_RE = re.compile(r"\A---[ \t]*\r?\n.*?\r?\n---[ \t]*(?:\r?\n|\Z)", re.DOTALL)
+_INSTRUCTION_BLOCK_RE = re.compile(
+    r"\A```smartvault[ \t]*\r?\n(.*?)\r?\n?```(?:[ \t]*\r?\n)*", re.DOTALL | re.IGNORECASE)
+_REWRITE_DIRECTIVE_RE = re.compile(
+    r"^[ \t]*(?:整理正文|重写正文|润色正文|content_rewrite)[ \t]*[:：=][ \t]*"
+    r"(是|否|yes|no|true|false|on|off|开|关)[ \t]*$",
+    re.IGNORECASE | re.MULTILINE)
+
+
+def parse_draft_instructions(raw_md: str) -> Tuple[str, str]:
+    """提取草稿指令块（v1.9.0）：正文最前面（frontmatter 之后、任何正文内容之前）的
+    ```smartvault 围栏块，是作者对本篇草稿的归档要求（归入目录/文件名/标签等）。
+
+    返回 (指令文本, 去除指令块后的正文)：
+    - 指令块只认「正文开头」位置——正文中段出现的同名围栏块是普通内容，不提取、不动；
+    - 未识别到（或内容为空）时正文原样返回（逐字不变，零副作用）；
+    - 归档终稿不含指令块（此处确定性剥离，非 LLM 决定）；原稿完整备份于 .smartvault/backup/。
+    """
+    text = raw_md.lstrip("\ufeff")
+    pos = 0
+    fm = _FRONTMATTER_RE.match(text)
+    if fm:
+        pos = fm.end()
+    rest = text[pos:]
+    skip = re.match(r"(?:[ \t]*\r?\n)*", rest)   # frontmatter 与指令块之间的空行
+    body_at = rest[skip.end():]
+    m = _INSTRUCTION_BLOCK_RE.match(body_at)
+    if m is None:
+        return "", raw_md
+    instructions = m.group(1).strip()
+    if not instructions:
+        return "", raw_md
+    body = text[:pos] + body_at[m.end():]   # 指令块及其前后分隔空行一并剥离
+    return instructions, body
+
+
+def parse_rewrite_directive(instructions: str) -> Optional[bool]:
+    """从草稿指令块解析「整理正文：是/否」结构化指令（唯一确定性覆盖项）。
+
+    返回 True/False；指令块中未出现该行时返回 None（沿用全局 processing.content_rewrite）。
+    正文是否允许 AI 整理是安全敏感项（v1.3.1 教训），自然语言请求不生效——
+    必须用这一行结构化指令显式声明，且仍受 rewrite_max_chars 长度上限约束。
+    """
+    m = _REWRITE_DIRECTIVE_RE.search(instructions or "")
+    if m is None:
+        return None
+    return m.group(1).strip().lower() in ("是", "yes", "true", "on", "开")
 
 
 def build_user_prompt(vault_name: str, draft_name: str, raw_md: str,
                       attach_blocks: List[str], tree_text: str, ctx_text: str,
-                      raw_max_chars: int, keep_original_content: bool = False) -> str:
+                      raw_max_chars: int, keep_original_content: bool = False,
+                      instructions: str = "") -> str:
     parts = [
         f"【当前仓库：{vault_name}｜目录树（优先归类到已有目录）】",
         tree_text or "（目录树为空）",
         "【ai_context.md（仓库规则与历史索引）】",
         ctx_text or "（文件不存在，可自行判断）",
-        f"【草稿原文（原始文件名：{draft_name}）】",
-        _clip_text(raw_md, raw_max_chars),
     ]
+    if instructions:
+        parts.append(
+            "【作者对本篇草稿的特别要求（优先满足：优先级仅次于输出契约，高于 ai_context "
+            "规则与一般整理规则；无法满足或与安全校验冲突时按契约默认规则处理）】\n" + instructions)
+    parts.append(f"【草稿原文（原始文件名：{draft_name}）】")
+    parts.append(_clip_text(raw_md, raw_max_chars))
     if attach_blocks:
         parts.append("【附件解析文本】\n" + "\n\n".join(attach_blocks))
     else:
@@ -1119,6 +1227,13 @@ def run_pipeline(cfg: Dict[str, Any], client: LLMClient, vault: Vault,
     proc = cfg["processing"]
     inbox_name = cfg["inbox_folder_name"]
     raw = md_path.read_text(encoding="utf-8", errors="replace").lstrip("\ufeff")
+    # v1.9.0 草稿指令块：正文最前的 ```smartvault 块是作者对本篇的归档要求——
+    # 注入 Prompt 优先满足（目录/文件名/标签/摘要侧重等），指令块确定性剥离、不进终稿
+    # （原稿完整备份于 .smartvault/backup/）；正文中间的同名围栏块是普通内容，不受影响
+    instructions, raw = parse_draft_instructions(raw)
+    if instructions:
+        LOG.info("检测到草稿指令块（%d 字符，将作为作者特别要求注入 LLM，指令块不进入终稿）：\n%s",
+                 len(instructions), instructions)
     LOG.info("开始处理草稿：%s（%d 字符）", md_path.name, len(raw))
 
     # 1) 等待引用的附件到齐（拖入多文件时附件可能晚于 md 到达）
@@ -1152,12 +1267,21 @@ def run_pipeline(cfg: Dict[str, Any], client: LLMClient, vault: Vault,
                           exclude_names=frozenset({inbox_name}))
     ctx_text = load_ai_context(vault.context_file, int(cfg["ai_context_max_chars"]))
     rewrite_enabled = bool(proc.get("content_rewrite", False))   # 默认 False：正文永不改写
+    per_note_rewrite = parse_rewrite_directive(instructions)
+    if per_note_rewrite is not None:   # 指令块「整理正文：是/否」仅覆盖本篇
+        LOG.info("草稿指令块「整理正文：%s」覆盖本篇正文改写开关（全局 content_rewrite=%s）",
+                 "是" if per_note_rewrite else "否", rewrite_enabled)
+        rewrite_enabled = per_note_rewrite
     rewrite_max = int(proc.get("rewrite_max_chars", 6000))
     keep_original = (not rewrite_enabled) or len(raw) > rewrite_max
+    if per_note_rewrite and keep_original:
+        LOG.warning("指令块要求整理正文，但正文 %d 字符超过 rewrite_max_chars（%d）上限，本篇仍保留原文",
+                    len(raw), rewrite_max)
     user_prompt = build_user_prompt(vault.name, md_path.name, raw, attach_blocks,
                                     tree_text, ctx_text,
                                     int(cfg["limits"]["raw_note_max_chars"]),
-                                    keep_original_content=keep_original)
+                                    keep_original_content=keep_original,
+                                    instructions=instructions)
 
     # 4) LLM 提炼（Strict JSON Schema 优先，失败自动回退纯提示词）
     raw_llm = client.chat([{"role": "system", "content": SYSTEM_PROMPT},

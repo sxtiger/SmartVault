@@ -22,6 +22,7 @@
   },
   "ocr": {
     "engine": "rapidocr",
+    "image_engine": "auto",
     "pdf_dpi": 200,
     "pdf_max_ocr_pages": 20,
     "pdf_min_text_chars": 20
