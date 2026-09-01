@@ -17,7 +17,8 @@ requests>=2.32.0
 
 # ---- 多模态解析 ----
 ocrmac>=0.5.0              # macOS Vision 框架 OCR（Neural Engine 加速）
-PyMuPDF>=1.24.0            # PDF 文本提取（含 iWork Preview.pdf）
+PyMuPDF>=1.24.0            # PDF 文本提取（含 iWork Preview.pdf 与扫描页渲染）
+rapidocr>=3.0.0            # 手写中文 OCR（PP-OCRv6 模型内置 wheel，离线可用；PDF 扫描页）
 python-docx>=1.1.0         # .docx
 openpyxl>=3.1.0            # .xlsx
 python-pptx>=0.6.23        # .pptx

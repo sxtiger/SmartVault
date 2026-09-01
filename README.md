@@ -26,7 +26,7 @@ SmartVault/
 │   ├── uninstall_launchd.sh         # 一键卸载
 │   ├── start_all.sh                 # 前台手动联调（Ctrl+C 一起退出）
 │   └── build_index.py               # 手动索引维护（增量 / 全量重建）
-├── tests/                           # 单元测试：纯函数 / 最近错误扫描 / LLM 客户端 / RAG 流式解码 / OpenAI 兼容层 / 归档保真性
+├── tests/                           # 单元测试：纯函数 / 最近错误扫描 / LLM 客户端 / RAG 流式解码 / OpenAI 兼容层 / 归档保真性 / PDF 双通道 OCR
 ├── models/                          # 本地嵌入模型（bge-small-zh-v1.5，手动下载）
 ├── data/                            # ChromaDB 持久化 + 索引状态
 └── logs/                            # 历史日志存档（v1.7.1 前旧日志；运行日志在 ~/Library/Logs/SmartVault，TCC 保护区内 launchd 打不开）
@@ -39,7 +39,8 @@ SmartVault/
 ```bash
 brew install python@3.12 ffmpeg
 # 说明：torch / mlx / chromadb 对 Python 3.12 的 wheel 支持最完整；
-#       ffmpeg 供 whisper 解码音视频；ocrmac 由 macOS 系统自带 Vision 框架驱动。
+#       ffmpeg 供 whisper 解码音视频；ocrmac 由 macOS 系统自带 Vision 框架驱动；
+#       rapidocr（PDF 扫描页手写中文识别，PP-OCRv6）模型内置于 pip 包，离线可用。
 ```
 
 ### 2. Python 虚拟环境与依赖
@@ -98,7 +99,7 @@ cp config.example.json config.json   # 真实配置不入 git（含个人路径�
 把 Markdown 草稿（可连同附件）拖入任意仓库的 `待处理笔记/`，守护进程会：
 
 1. 等文件写入稳定（防抖）并等引用附件到齐（`![[xxx.png]]` / `[t](xxx.pdf)` / HTML `<img src="附件/xxx.png">`）
-2. 按类型解析附件：图像→Vision OCR；音视频→whisper(Metal)；PDF→PyMuPDF；Office→python-docx/openpyxl/python-pptx；iWork→QuickLook/Preview.pdf
+2. 按类型解析附件：图像→Vision OCR；音视频→whisper(Metal)；PDF→PyMuPDF 文本层 + 扫描页（**手写中文**）RapidOCR；Office→python-docx/openpyxl/python-pptx；iWork→QuickLook/Preview.pdf
 3. 注入「仓库目录树 + ai_context.md（规则与历史索引）」让 LLM 生成 Strict JSON
    （`target_folder / new_filename / summary / tags / link_terms / optimized_content`，全简体中文）
 4. 校验净化（拒绝越权目录、非法文件名），移动附件、写入带 YAML 属性的终稿、备份草稿到 `.smartvault/backup/`（保留最近 100 份）后删除，并自动清理收件箱内残留的空目录（如归档后空掉的 `附件/`）
