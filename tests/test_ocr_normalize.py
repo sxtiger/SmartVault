@@ -179,7 +179,7 @@ class TestNormalizeIntegration(unittest.TestCase):
         """PDF 扫描页：842x595pt 页 @200dpi 渲染 2339px → 归一化 800px ndarray。"""
         eng = self._engine()
         pdf = self._scan_pdf()
-        kind, text = sv.extract_pdf(pdf, {})
+        kind, text = sv.extract_pdf(pdf, {"engine": "rapidocr"})
         self.assertEqual(len(eng.calls), 1)
         self.assertEqual(_ndarray(eng.calls[0]).shape[1], 800)
         self.assertIn("手写 1 页", kind)
@@ -189,7 +189,7 @@ class TestNormalizeIntegration(unittest.TestCase):
         """关闭归一化：扫描页按渲染 PNG 字节流原样透传（v1.8.0 行为）。"""
         eng = self._engine()
         pdf = self._scan_pdf("关闭归一化.pdf")
-        sv.extract_pdf(pdf, {"rapidocr_max_width": 0})
+        sv.extract_pdf(pdf, {"engine": "rapidocr", "rapidocr_max_width": 0})
         self.assertEqual(len(eng.calls), 1)
         self.assertIsInstance(eng.calls[0], (bytes, bytearray))
         self.assertEqual(bytes(eng.calls[0][:4]), b"\x89PNG")

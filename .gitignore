@@ -7,6 +7,9 @@ config.json
 secrets/
 ai_context.md
 
+# ===== 真实测试样本（用户提供的手写 PDF/图片/标注，内容永不入库）=====
+tmp/
+
 # ===== Python =====
 __pycache__/
 *.py[cod]

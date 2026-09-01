@@ -21,12 +21,15 @@
     "language_preference": ["zh-Hans", "en-US"]
   },
   "ocr": {
-    "engine": "rapidocr",
+    "engine": "vlm",
     "image_engine": "auto",
     "pdf_dpi": 200,
     "pdf_max_ocr_pages": 20,
     "pdf_min_text_chars": 20,
-    "rapidocr_max_width": 800
+    "rapidocr_max_width": 800,
+    "vlm_model": "mlx-community/Qwen2.5-VL-7B-Instruct-4bit",
+    "vlm_base_url": "http://localhost:1234/v1",
+    "vlm_timeout": 300
   },
   "whisper": {
     "backend": "auto",
