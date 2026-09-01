@@ -9,11 +9,16 @@
 #     "Bootstrap failed: 5: Input/output error"（旧实例还没拆完）
 #     → bootout 后轮询等待作业真正消失，bootstrap 失败自动重试
 #  2. plist 若带 com.apple.quarantine 属性会被 launchd 拒绝 → 主动清除
+#  3. macOS TCC（Sequoia/26+）：launchd 打不开 ~/Documents 下的 stdout/stderr
+#     日志文件（kTCCServiceSystemPolicyDocumentsFolder 拒绝 xpcproxy 的授权请求），
+#     作业在 exec 前即以 78 EX_CONFIG 秒退且日志为空（重启后必现）
+#     → 日志统一放 ~/Library/Logs/SmartVault（不受 TCC 保护），模板用 @LOG_DIR@ 占位
 # =====================================================================
 set -uo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PYTHON_BIN="${PYTHON:-$PROJECT_DIR/.venv/bin/python}"
+LOG_DIR="$HOME/Library/Logs/SmartVault"
 UID_NUM="$(id -u)"
 FAILED=0
 
@@ -23,7 +28,13 @@ if [ ! -x "$PYTHON_BIN" ]; then
     exit 1
 fi
 
-mkdir -p "$PROJECT_DIR/logs" "$HOME/Library/LaunchAgents"
+mkdir -p "$LOG_DIR" "$HOME/Library/LaunchAgents"
+
+# 一次性迁移：旧项目内 logs/ 的历史日志复制到新目录（保留原件不动，幂等只补缺）。
+# 注意 .menubar_err_state.json 等隐藏状态文件刻意不迁移——换目录即重置增量扫描基线。
+for _f in "$PROJECT_DIR/logs"/*.log "$PROJECT_DIR/logs"/*.log.*; do
+    [ -f "$_f" ] && [ ! -f "$LOG_DIR/$(basename "$_f")" ] && cp -p "$_f" "$LOG_DIR/"
+done
 
 job_exists() {  # 作业是否还在 launchd 域中
     launchctl print "gui/$UID_NUM/$1" >/dev/null 2>&1
@@ -43,7 +54,8 @@ install_one() {
     src="$PROJECT_DIR/launchd/$label.plist"
     dst="$HOME/Library/LaunchAgents/$label.plist"
     sed -e "s|@PROJECT_DIR@|$PROJECT_DIR|g" \
-        -e "s|@PYTHON@|$PYTHON_BIN|g" "$src" > "$dst"
+        -e "s|@PYTHON@|$PYTHON_BIN|g" \
+        -e "s|@LOG_DIR@|$LOG_DIR|g" "$src" > "$dst"
     chmod 644 "$dst"
     xattr -d com.apple.quarantine "$dst" 2>/dev/null || true
 
@@ -75,5 +87,5 @@ echo ""
 echo "当前 launchd 状态："
 launchctl list | grep aibrain || echo "（无 aibrain 作业在运行！）"
 echo ""
-echo "日志：tail -f $PROJECT_DIR/logs/*.log"
+echo "日志：tail -f $LOG_DIR/*.log"
 exit $FAILED

@@ -67,7 +67,7 @@ CONFIG_DEFAULTS: Dict[str, Any] = {
     "inbox_folder_name": "待处理笔记",
     "context_file": "ai_context.md",
     "vaults": [],
-    "log_dir": "logs",
+    "log_dir": "~/Library/Logs/SmartVault",
     "rag": {"enabled": True, "embedding_model_path": "models/bge-small-zh-v1.5",
             "embedding_device": "mps", "chroma_dir": "data/chroma", "collection_name": "smartvault",
             "chunk_size": 500, "chunk_overlap": 80, "top_k": 4, "rescan_seconds": 300,
@@ -99,7 +99,9 @@ def load_config(path: Path) -> Dict[str, Any]:
     rag["embedding_model_path_abs"] = str((cfg_dir / rag["embedding_model_path"]).resolve())
     rag["chroma_dir_abs"] = str((cfg_dir / rag["chroma_dir"]).resolve())
     cfg["_config_dir"] = str(cfg_dir)
-    cfg["log_dir_abs"] = str((cfg_dir / cfg.get("log_dir", "logs")).resolve())
+    # log_dir 支持 ~ 开头的绝对路径（v1.7.1 默认迁出 ~/Documents：TCC 禁止 launchd 打开其下日志）
+    _log_dir = Path(cfg.get("log_dir", "~/Library/Logs/SmartVault")).expanduser()
+    cfg["log_dir_abs"] = str((cfg_dir / _log_dir).resolve())
     cfg["_state_path_abs"] = str((cfg_dir / _STATE_PATH).resolve())
     return cfg
 

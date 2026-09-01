@@ -67,5 +67,5 @@
     { "name": "技术学习", "path": "/Users/YOUR_NAME/Documents/ObsidianVaults/技术学习" },
     { "name": "读书笔记", "path": "/Users/YOUR_NAME/Documents/ObsidianVaults/读书笔记" }
   ],
-  "log_dir": "logs"
+  "log_dir": "~/Library/Logs/SmartVault"
 }

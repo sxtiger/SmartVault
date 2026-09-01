@@ -29,7 +29,7 @@ SmartVault/
 ├── tests/                           # 单元测试：纯函数 / 最近错误扫描 / LLM 客户端 / RAG 流式解码 / OpenAI 兼容层 / 归档保真性
 ├── models/                          # 本地嵌入模型（bge-small-zh-v1.5，手动下载）
 ├── data/                            # ChromaDB 持久化 + 索引状态
-└── logs/                            # 运行日志（自动轮转）
+└── logs/                            # 历史日志存档（v1.7.1 前旧日志；运行日志在 ~/Library/Logs/SmartVault，TCC 保护区内 launchd 打不开）
 ```
 
 ## 一、环境准备（一次性）
@@ -195,11 +195,11 @@ const { answer, sources } = await res.json();
 ```bash
 bash scripts/install_launchd.sh      # 安装并启动两个服务（幂等可重复执行）
 launchctl list | grep aibrain        # 查看状态
-tail -f logs/*.log                   # 看日志
+tail -f ~/Library/Logs/SmartVault/*.log   # 看日志（v1.7.1 起不在项目 logs/ 下）
 bash scripts/uninstall_launchd.sh    # 卸载
 ```
 
-`launchd/*.plist` 是模板（含 `@PROJECT_DIR@`、`@PYTHON@` 占位符），安装脚本会自动替换为真实路径并写入 `~/Library/LaunchAgents/`。
+`launchd/*.plist` 是模板（含 `@PROJECT_DIR@`、`@PYTHON@`、`@LOG_DIR@` 占位符），安装脚本会自动替换为真实路径并写入 `~/Library/LaunchAgents/`。日志目录固定为 `~/Library/Logs/SmartVault`（`@LOG_DIR@`）——macOS 26 起 TCC 禁止 launchd 打开 `~/Documents` 下的 stdout/stderr 日志，作业会在启动前以 78 秒退（v1.7.1 教训）。
 
 ### 菜单栏控制台（推荐：图形化启停与诊断）
 
@@ -215,7 +215,9 @@ open SmartVaultMenuBar.app           # 安装/唤醒 launchd 代理 → 状态�
 > **双击 `.app` 即同时注册开机自启**（launchd 代理 `com.user.aibrain.menubar`）。
 > 技术注解：经 Finder/`open` 启动的 GUI app 受 macOS TCC 限制、读不了 `~/Documents`，
 > 因此 `.app` 只是一个"确保 launchd 代理运行"的启动器，真正的菜单栏进程由 launchd 拉起
-> （与 ingest/rag 同机制，无权限问题）。
+> （与 ingest/rag 同机制）。⚠ 但 launchd 的 stdout/stderr 日志**不能**放 `~/Documents`：
+> macOS 26 起 TCC 会拒绝 launchd 打开该目录下的文件，作业在启动前即以 78 EX_CONFIG 秒退
+> （v1.7.1 教训）——日志一律写入 `~/Library/Logs/SmartVault`；启动失败时启动器会弹窗报错。
 
 功能一览：
 
@@ -227,7 +229,7 @@ open SmartVaultMenuBar.app           # 安装/唤醒 launchd 代理 → 状态�
 | 🧹 清理已删笔记残留（同步索引） | 增量同步 RAG：移除已删除笔记的向量块 + 剔除 ai_context.md 失效归档条目（后台每 5 分钟也会自动执行；删除/清理测试笔记后点它立即生效） |
 | ♻️ 重建 RAG 索引（清空后重建） | 确认后清空整个向量库，再按当前仓库实际存在的笔记全量重建；清空测试库后点它让索引归零 |
 | 🔍 综合健康检查 | config / Vault 路径 / 嵌入模型 / LM Studio 端口 / `/health` `/status` / 进程退出码 逐项 ✔/✘ |
-| ⚠️ 最近错误分析 | 增量监测 `logs/*.log` 自上次检查以来新增的 ERROR / Traceback / 启动失败（连续重复自动去重；历史旧错误不重复告警） |
+| ⚠️ 最近错误分析 | 增量监测 `~/Library/Logs/SmartVault/*.log` 自上次检查以来新增的 ERROR / Traceback / 启动失败（连续重复自动去重；历史旧错误不重复告警） |
 | 🖥 开机自启：菜单栏控制台 | 控制台自身的登录项开关（安装 `com.user.aibrain.menubar`） |
 | 🧹 卸载全部 SmartVault 服务 | 停止并移除全部三个 launchd 登录项（代码与数据不受影响） |
 
@@ -235,8 +237,8 @@ open SmartVaultMenuBar.app           # 安装/唤醒 launchd 代理 → 状态�
 
 - 图标 `⚠` 且 RAG 显示"运行中"：通常是嵌入模型仍在加载（点击"启动/重启"后 10–30 秒内出现属正常），等待片刻即可
 - 首次点击"实时日志"会请求控制 Terminal 的自动化权限，请点允许
-- 内置单例锁（`logs/.menubar.lock`）防止双开；菜单栏自启项 `KeepAlive=false`，手动退出后不会被强行拉起
-- **刘海屏 MacBook 看不到 `●`**：图标可能被系统排入刘海遮挡区（存在但不可见）。⌘ 拖动图标到时钟左侧可固定位置；或重启菜单栏控制台（`launchctl kickstart -k gui/$(id -u)/com.user.aibrain.menubar`）触发重新布局。诊断信息见 `logs/menubar.stderr.log` 的 `[SmartVault][诊断]` 行
+- 内置单例锁（`~/Library/Logs/SmartVault/.menubar.lock`）防止双开；菜单栏自启项 `KeepAlive=false`，手动退出后不会被强行拉起
+- **刘海屏 MacBook 看不到 `●`**：图标可能被系统排入刘海遮挡区（存在但不可见）。⌘ 拖动图标到时钟左侧可固定位置；或重启菜单栏控制台（`launchctl kickstart -k gui/$(id -u)/com.user.aibrain.menubar`）触发重新布局。诊断信息见 `~/Library/Logs/SmartVault/menubar.stderr.log` 的 `[SmartVault][诊断]` 行
 
 ### 多仓库与索引清理
 
