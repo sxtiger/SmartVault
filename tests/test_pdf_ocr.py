@@ -106,7 +106,7 @@ class TestExtractPdfDualChannel(unittest.TestCase):
     def test_scanned_pages_use_rapidocr(self):
         pdf = make_pdf(self._tmp(), text_pages=(), image_pages=2)
         eng = self._engine()
-        kind, text = sv.extract_pdf(pdf, {})
+        kind, text = sv.extract_pdf(pdf, {"engine": "rapidocr"})
         self.assertEqual(len(eng.calls), 2)                       # 每个扫描页各渲染一次
         self.assertIn("RapidOCR", kind)
         self.assertIn("手写 2 页", kind)
@@ -118,7 +118,7 @@ class TestExtractPdfDualChannel(unittest.TestCase):
         pdf = make_pdf(self._tmp(), text_pages=["Mixed PDF page with enough text layer content."],
                        image_pages=1)
         eng = self._engine()
-        kind, text = sv.extract_pdf(pdf, {})
+        kind, text = sv.extract_pdf(pdf, {"engine": "rapidocr"})
         self.assertEqual(len(eng.calls), 1)                       # 只有扫描页走 OCR
         self.assertIn("Mixed PDF", text)
         self.assertIn("手写OCR", text)
@@ -127,14 +127,14 @@ class TestExtractPdfDualChannel(unittest.TestCase):
         """文本层字符数低于 pdf_min_text_chars 的页视为扫描页（水印页/坏导出页）。"""
         pdf = make_pdf(self._tmp(), text_pages=["short"], image_pages=0)
         eng = self._engine()
-        kind, text = sv.extract_pdf(pdf, {"pdf_min_text_chars": 20})
+        kind, text = sv.extract_pdf(pdf, {"engine": "rapidocr", "pdf_min_text_chars": 20})
         self.assertEqual(len(eng.calls), 1)
         self.assertIn("手写OCR", text)
 
     def test_ocr_page_limit(self):
         pdf = make_pdf(self._tmp(), text_pages=(), image_pages=3)
         eng = self._engine()
-        kind, text = sv.extract_pdf(pdf, {"pdf_max_ocr_pages": 2})
+        kind, text = sv.extract_pdf(pdf, {"engine": "rapidocr", "pdf_max_ocr_pages": 2})
         self.assertEqual(len(eng.calls), 2)                       # 上限生效
         self.assertIn("超出 OCR 页数上限", text)
         self.assertIn("已省略", text)
@@ -152,7 +152,7 @@ class TestExtractPdfDualChannel(unittest.TestCase):
         pdf = make_pdf(self._tmp(), text_pages=(), image_pages=2)
         sv._RAPIDOCR_STATE["engine"] = None
         sv._RAPIDOCR_STATE["error"] = "未安装 rapidocr（pip install rapidocr）"
-        kind, text = sv.extract_pdf(pdf, {})
+        kind, text = sv.extract_pdf(pdf, {"engine": "rapidocr"})
         self.assertEqual(kind, "PDF 文本（PyMuPDF）")             # 无 OCR 成功页
         self.assertEqual(text.count("未安装 rapidocr"), 2)         # 每个扫描页如实注明
         self.assertIn("请打开原文件查看", text)

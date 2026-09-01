@@ -26,7 +26,7 @@ SmartVault/
 │   ├── uninstall_launchd.sh         # 一键卸载
 │   ├── start_all.sh                 # 前台手动联调（Ctrl+C 一起退出）
 │   └── build_index.py               # 手动索引维护（增量 / 全量重建）
-├── tests/                           # 单元测试：纯函数 / 最近错误扫描 / LLM 客户端 / RAG 流式解码 / OpenAI 兼容层 / 归档保真性 / PDF 双通道 OCR / 图像 OCR 引擎路由 / OCR 输入归一化 / 草稿指令块
+├── tests/                           # 单元测试：纯函数 / 最近错误扫描 / LLM 客户端 / RAG 流式解码 / OpenAI 兼容层 / 归档保真性 / PDF 双通道 OCR / 图像 OCR 引擎路由 / OCR 输入归一化 / VLM 主引擎与 RapidOCR 兜底 / 草稿指令块
 ├── models/                          # 本地嵌入模型（bge-small-zh-v1.5，手动下载）
 ├── data/                            # ChromaDB 持久化 + 索引状态
 └── logs/                            # 历史日志存档（v1.7.1 前旧日志；运行日志在 ~/Library/Logs/SmartVault，TCC 保护区内 launchd 打不开）
@@ -40,7 +40,9 @@ SmartVault/
 brew install python@3.12 ffmpeg
 # 说明：torch / mlx / chromadb 对 Python 3.12 的 wheel 支持最完整；
 #       ffmpeg 供 whisper 解码音视频；ocrmac 由 macOS 系统自带 Vision 框架驱动；
-#       rapidocr（PDF 扫描页手写中文识别，PP-OCRv6）模型内置于 pip 包，离线可用。
+#       rapidocr（手写中文识别兜底引擎，PP-OCRv6）模型内置于 pip 包，离线可用；
+#       手写 PDF 主识别用 Qwen2.5-VL（mlx-community/Qwen2.5-VL-7B-Instruct-4bit），
+#       经 LM Studio 本地推理（lms get mlx-community/Qwen2.5-VL-7B-Instruct-4bit 下载，约 5.5GB）。
 ```
 
 ### 2. Python 虚拟环境与依赖
@@ -99,7 +101,7 @@ cp config.example.json config.json   # 真实配置不入 git（含个人路径�
 把 Markdown 草稿（可连同附件）拖入任意仓库的 `待处理笔记/`，守护进程会：
 
 1. 等文件写入稳定（防抖）并等引用附件到齐（`![[xxx.png]]` / `[t](xxx.pdf)` / HTML `<img src="附件/xxx.png">`）
-2. 按类型解析附件：图像→Vision OCR（**潦草手写自动 RapidOCR 兜底**，`ocr.image_engine` 可选 auto/vision/rapidocr）；音视频→whisper(Metal)；PDF→PyMuPDF 文本层 + 扫描页（**手写中文**）RapidOCR；Office→python-docx/openpyxl/python-pptx；iWork→QuickLook/Preview.pdf
+2. 按类型解析附件：图像→Vision OCR（**潦草手写自动 RapidOCR 兜底**，`ocr.image_engine` 可选 auto/vision/rapidocr）；音视频→whisper(Metal)；PDF→PyMuPDF 文本层 + 扫描页（**手写中文**）Qwen2.5-VL 逐字转写、失败/空结果自动 RapidOCR 兜底（`ocr.engine` 可选 vlm/rapidocr/off）；Office→python-docx/openpyxl/python-pptx；iWork→QuickLook/Preview.pdf
 3. 注入「仓库目录树 + ai_context.md（规则与历史索引）」让 LLM 生成 Strict JSON
    （`target_folder / new_filename / summary / tags / link_terms / optimized_content`，全简体中文）
 4. 校验净化（拒绝越权目录、非法文件名），移动附件、写入带 YAML 属性的终稿、备份草稿到 `.smartvault/backup/`（保留最近 100 份）后删除，并自动清理收件箱内残留的空目录（如归档后空掉的 `附件/`）
@@ -112,6 +114,8 @@ cp config.example.json config.json   # 真实配置不入 git（含个人路径�
 **图像手写识别（v1.9.0 起）**：图像附件默认双引擎——先 Vision（macOS Neural Engine，印刷体与规整手写效果好、零延迟），未识别到文字或识别失败时自动用 RapidOCR（PP-OCRv6，中文手写友好，与 PDF 扫描页同引擎）兜底重试；两引擎都为空（纯图形图片）则如实占位。手写图片为主的场景建议 `ocr.image_engine: "rapidocr"`（实测逐字扰动模拟潦草手写 28 字：RapidOCR 全对，Vision 错 1 字）；HEIC 格式仅 Vision 支持。
 
 **手写识别输入归一化（v1.10.0 起）**：RapidOCR 识别前会把宽超 `ocr.rapidocr_max_width`（默认 800px，LANCZOS 降采样、EXIF 方向转正）的图自动缩小——PP-OCRv6 对 ~600-1000px 宽的输入最稳，大图直喂反而丢细节。真实潦草手写页实测：字准确率 52.5% → 67.6%（+15 个百分点），清晰字迹 97.1% 无损，耗时不变（~0.4s）；黑白极潦草复核样本上无增益也无害（此时瓶颈在字迹潦草度本身，非分辨率）。适用于图像附件与 PDF 扫描页两条路径；极潦草字迹可在 600~1000 区间微调，`0` 表示关闭。
+
+**手写 PDF 主引擎 Qwen2.5-VL（v1.11.0 起）**：PDF 扫描页默认先经 LM Studio 用 `mlx-community/Qwen2.5-VL-7B-Instruct-4bit` 逐字转写（`pdf_dpi` 原分辨率、temperature=0、防漏行指令），失败或空结果时自动降级 RapidOCR（PP-OCRv6 + 800px 归一化）兜底——LM Studio 未启动、模型未加载或超时都不断档，转录 kind 会如实标注实际引擎（`PyMuPDF+VLM` / `VLM→RapidOCR`）。动机：RapidOCR 在极潦草手写上字符准确率仅 21~44%、专有名词与人名几乎全崩，Qwen2.5-VL 靠语言先验词级反超（实测 67% vs 54%）；代价是热推理 3.6~6s/页、JIT 冷启约 40s、约 5.5GB 显存常驻、偶发同义改写式幻觉——转录仅作检索辅助，以原附件为准。建议在 LM Studio 中把归档模型与 VLM 同时 `lms load`（24GB 内存可容纳），避免模型切换开销；不装 VLM 时全程自动 RapidOCR，无需改任何配置。
 
 ### 草稿指令块：对某篇草稿单独提要求（v1.9.0 起）
 
@@ -299,7 +303,7 @@ open SmartVaultMenuBar.app           # 安装/唤醒 launchd 代理 → 状态�
 4. **LM Studio 上下文窗口**：归档会把草稿全文 + 仓库上下文整体发给模型（2 万字符草稿 ≈ 1.2 万 tokens），模型需以足够 context length 加载——建议 `lms load <model> -c 32768 --parallel 1`；超限时日志会给出明确指引，而非无效重试。
 5. **首次索引较慢**：几千篇笔记约需几分钟（MPS 嵌入 ~1-2k chunks/秒），之后全部增量。
 6. **失败保护**：单篇草稿处理失败会保留在收件箱原处并记入日志，可用 `--scan` 或 `--once` 重试，绝不会静默丢稿。
-7. **手写识别上限**：OCR 转录仅作检索辅助（折叠块标注「以原附件为准」）。极潦草字迹（连笔快写）任何引擎都难超 ~70% 字准确率——v1.10.0 的输入归一化（`ocr.rapidocr_max_width`，默认 800）已把真实潦草样本从 52.5% 提到 67.6%。更大模型（PP-OCRv5 server / v6 medium）实测无增益；VLM（Qwen2.5-VL-7B）按潦草度分界：中等潦草无增益（54.0% < 67.6%），极潦草场景词级反超（67% vs 54%——语言先验能救回 RapidOCR 全档全崩的短语与人名），但代价是热推理 3.6~6s/页、JIT 冷启 38~51s、5.5GB 常驻且有同义改写式幻觉，经评估暂不引入，基准数据留档供复评。
+7. **手写识别上限与 VLM 主引擎**：OCR 转录仅作检索辅助（折叠块标注「以原附件为准」）。极潦草字迹（连笔快写）任何引擎都难超 ~70% 字准确率——RapidOCR 的 800px 归一化（v1.10.0）把真实潦草样本提到 67.6%，但极潦草样本上仅 21~44% 且专有名词全崩；v1.11.0 起 PDF 扫描页默认改用 **Qwen2.5-VL 主识别 + RapidOCR 兜底**（极潦草词级 67% vs 54%，语言先验能救回全崩的短语与人名；VLM 不可用时自动降级，无需干预）。代价：热推理 3.6~6s/页、JIT 冷启约 40s、约 5.5GB 显存常驻、偶发同义改写式幻觉；建议 LM Studio 中同时加载归档与 VLM 两模型避免切换；追求速度或未装 VLM 可 `ocr.engine: "rapidocr"` 回退纯 RapidOCR（图像附件路径不受影响，仍为 Vision+RapidOCR 双引擎）。
 
 ## 五、深入阅读
 

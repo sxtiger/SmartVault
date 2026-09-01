@@ -10,7 +10,8 @@ SmartVault / 智能仓库 —— 模块 A：自动化摄入与归档守护进程
        图像   (.png/.jpg/.jpeg/.heic...)   -> ocrmac（macOS Vision / Neural Engine）；
                                               auto 模式下 Vision 未识别到文字时 RapidOCR 兜底（手写）
        音视频 (.mp3/.m4a/.wav/.mp4/.mov..) -> mlx-whisper（Metal）/ openai-whisper（备选）
-       PDF    (.pdf)                       -> PyMuPDF(fitz) 文本层；扫描页（中文手写）-> RapidOCR
+       PDF    (.pdf)                       -> PyMuPDF(fitz) 文本层；扫描页（中文手写）-> VLM(Qwen2.5-VL)
+                                               逐字转写 + RapidOCR 兜底（v1.11.0）
        Office (.docx/.xlsx/.pptx)          -> python-docx / openpyxl / python-pptx
        iWork  (.pages/.numbers/.key)       -> 解剖 Zip 包/包目录 -> QuickLook/Preview.pdf -> fitz
   3. 动态扫描仓库目录树（一/二级）+ 读取 ai_context.md 人设与历史索引，注入 Prompt，
@@ -30,6 +31,7 @@ SmartVault / 智能仓库 —— 模块 A：自动化摄入与归档守护进程
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import logging
 import re
@@ -108,8 +110,10 @@ CONFIG_DEFAULTS: Dict[str, Any] = {
     "tree_depth": 2,
     "obsidian": {"wake_enabled": True},
     "vision": {"language_preference": ["zh-Hans", "en-US"]},
-    "ocr": {"engine": "rapidocr", "image_engine": "auto", "pdf_dpi": 200,
-            "pdf_max_ocr_pages": 20, "pdf_min_text_chars": 20, "rapidocr_max_width": 800},
+    "ocr": {"engine": "vlm", "image_engine": "auto", "pdf_dpi": 200,
+            "pdf_max_ocr_pages": 20, "pdf_min_text_chars": 20, "rapidocr_max_width": 800,
+            "vlm_model": "mlx-community/Qwen2.5-VL-7B-Instruct-4bit",
+            "vlm_base_url": "http://localhost:1234/v1", "vlm_timeout": 300},
     "whisper": {"backend": "auto", "mlx_model": "mlx-community/whisper-large-v3-turbo",
                 "openai_model": "small", "language": "zh"},
     "processing": {"debounce_seconds": 8, "quiet_seconds": 3, "attachment_wait_timeout": 30,
@@ -495,13 +499,110 @@ def _get_rapidocr_engine():
     return _RAPIDOCR_STATE["engine"]
 
 
+_VLM_STATE: Dict[str, Any] = {}  # {"configured": 配置的 vlm_model, "resolved": 解析后的请求模型 id}
+
+_VLM_OCR_PROMPT = (
+    "逐字转写图片中的全部手写文字，要求：\n"
+    "1. 从上到下、从左到右按行转写，不要遗漏任何一行（包括日期、落款、边角小字）\n"
+    "2. 逐字照抄，看不清的字用「□」占位，绝不猜测编造\n"
+    "3. 只输出转写文字本身，不要任何解释"
+)
+
+
+def _vlm_base_url(ocr_cfg: Optional[Dict[str, Any]] = None) -> str:
+    """读 ocr.vlm_base_url（LM Studio OpenAI 兼容端点，默认本机 1234）。"""
+    return str((ocr_cfg or {}).get("vlm_base_url",
+                                   CONFIG_DEFAULTS["ocr"]["vlm_base_url"])).rstrip("/")
+
+
+def _vlm_resolve_model(ocr_cfg: Optional[Dict[str, Any]] = None) -> str:
+    """在 LM Studio /models 列表中解析 vlm_model 实际可用的请求 id（进程内缓存）。
+
+    LM Studio 对同一模型可能以「发布方/全路径」或「目录短名」两种 id 提供服务：
+    配置写全路径而实际以短名加载时，按「去发布方前缀 + 去量化后缀」做等价匹配
+    （mlx-community/Qwen2.5-VL-7B-Instruct-4bit ≡ qwen2.5-vl-7b-instruct）。
+    列表里找不到（服务未启/未加载）时原样返回配置值——LM Studio 支持按全路径
+    JIT 拉起模型，成败交由识别请求本身定夺；任何解析异常同样不拦路。
+    """
+    configured = str((ocr_cfg or {}).get("vlm_model",
+                                         CONFIG_DEFAULTS["ocr"]["vlm_model"])).strip()
+    if _VLM_STATE.get("configured") == configured:
+        return str(_VLM_STATE.get("resolved") or configured)
+    resolved = configured
+    try:
+        resp = requests.get(f"{_vlm_base_url(ocr_cfg)}/models", timeout=5)
+        resp.raise_for_status()
+        ids = [str(m.get("id", "")) for m in ((resp.json() or {}).get("data") or [])]
+
+        def _core(mid: str) -> str:  # 去发布方前缀与量化后缀，压成纯小写字母数字
+            tail = re.sub(r"[-_](?:4|5|6|8)bit$", "", mid.split("/")[-1], flags=re.I)
+            return re.sub(r"[^a-z0-9]", "", tail.lower())
+
+        want = _core(configured)
+        for mid in ids:
+            if want and _core(mid) == want:
+                resolved = mid
+                break
+    except Exception:  # noqa: BLE001 —— 解析失败不拦路：按配置值直接请求
+        pass
+    _VLM_STATE["configured"] = configured
+    _VLM_STATE["resolved"] = resolved
+    return resolved
+
+
+def _vlm_ocr_png(png_bytes: bytes, ocr_cfg: Optional[Dict[str, Any]] = None) -> str:
+    """VLM 逐字转写整页手写图（LM Studio 视觉对话接口）；返回原始文本（空串 = 未识别）。
+
+    与 PP-OCRv6 不同，VLM 没有 800px 输入甜点——直接喂 pdf_dpi 原分辨率渲染
+    （实测分辨率越高越稳）；temperature=0 求确定性。任何失败（连接拒绝/超时/
+    模型未加载/HTTP 非 2xx/响应结构异常）抛异常，由调用方降级 RapidOCR 兜底
+    ——VLM 永远不该中断归档流水线。注意：不走 apply_thinking_switch（/no_think
+    软开关是 Qwen3 文本模型的约定，掺进转写指令会污染输出）。
+    """
+    if requests is None:
+        raise RuntimeError("缺少依赖 requests（pip install requests）")
+    cfg = ocr_cfg or {}
+    try:
+        timeout = int(cfg.get("vlm_timeout", 300))
+    except (TypeError, ValueError):
+        timeout = 300
+    b64 = base64.b64encode(png_bytes).decode("ascii")
+    payload: Dict[str, Any] = {
+        "model": _vlm_resolve_model(cfg),
+        "temperature": 0,
+        "max_tokens": 2048,
+        "stream": False,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+                {"type": "text", "text": _VLM_OCR_PROMPT},
+            ],
+        }],
+    }
+    resp = requests.post(f"{_vlm_base_url(cfg)}/chat/completions", json=payload,
+                         timeout=timeout)
+    if resp.status_code != 200:
+        raise RuntimeError(f"LM Studio VLM 接口 HTTP {resp.status_code}：{resp.text[:200]}")
+    try:
+        content = (((resp.json() or {}).get("choices") or [{}])[0]
+                   .get("message", {}).get("content"))
+    except Exception as e:  # noqa: BLE001 —— 响应结构异常视为失败，交调用方兜底
+        raise RuntimeError(f"VLM 响应结构异常：{e}") from e
+    text = content if isinstance(content, str) else ""
+    return re.sub(r"^```[a-zA-Z]*\s*|```\s*$", "", text.strip()).strip()  # 去偶发代码围栏
+
+
 def extract_pdf(path: Path, ocr_cfg: Optional[Dict[str, Any]] = None) -> Tuple[str, str]:
-    """PDF 提取（v1.8.0 双通道）：文本层优先（PyMuPDF）；扫描页（含中文手写）RapidOCR 兜底。
+    """PDF 提取（v1.8.0 双通道 / v1.11.0 VLM 主引擎）：文本层优先（PyMuPDF）；
+    扫描页（含中文手写）ocr.engine=vlm（默认）时经 LM Studio 用 Qwen2.5-VL
+    逐字转写，失败/空结果时 RapidOCR（PP-OCRv6 + 输入归一化）兜底。
 
     逐页判定：文本层字符数 >= pdf_min_text_chars 直接取文本（电子 PDF 零成本、逐字保真）；
-    低于阈值视为扫描页（手写笔记 PDF 即此类）——以 pdf_dpi 渲染成 PNG 交给 RapidOCR，
-    识别前按 ocr.rapidocr_max_width（默认 800）归一化输入宽度（v1.10.0，见
-    _rapidocr_normalize——潦草手写字准确率实测 52.5%→67.6%）。
+    低于阈值视为扫描页（手写笔记 PDF 即此类）——以 pdf_dpi 渲染成 PNG：VLM 拿原分辨率
+    （与 PP-OCRv6 不同，VLM 无 800px 甜点，实测分辨率越高越稳）；RapidOCR 兜底前按
+    ocr.rapidocr_max_width（默认 800）归一化（见 _rapidocr_normalize——归一化后潦草
+    手写字准确率实测 52.5%→67.6%）。engine=rapidocr 跳过 VLM 纯走 RapidOCR。
     返回 (类型标签, 全文)；OCR 关闭/不可用/单页失败一律降级为占位说明，绝不中断归档。
     """
     import fitz
@@ -510,36 +611,64 @@ def extract_pdf(path: Path, ocr_cfg: Optional[Dict[str, Any]] = None) -> Tuple[s
     max_w = _rapidocr_max_width(cfg)
     max_ocr_pages = max(0, int(cfg.get("pdf_max_ocr_pages", 20)))
     min_chars = max(1, int(cfg.get("pdf_min_text_chars", 20)))
-    engine_on = str(cfg.get("engine", "rapidocr")).strip().lower() not in ("off", "disable", "false")
+    engine = str(cfg.get("engine", "vlm")).strip().lower()
+    engine_on = engine not in ("off", "disable", "false")
+    use_vlm = engine == "vlm"
     pages: List[str] = []
-    ocr_pages = 0
+    vlm_pages = 0   # VLM 成功转写的扫描页数
+    ocr_pages = 0   # RapidOCR 成功识别的扫描页数（rapidocr 模式或 VLM 降级兜底）
     with fitz.open(str(path)) as doc:
-        total = len(doc)
         for i, page in enumerate(doc, 1):
             t = page.get_text("text").strip()
             if len(t) >= min_chars:
                 pages.append(f"[第 {i} 页]\n{t}")
                 continue
-            # —— 扫描页（无/极少文本层）：渲染位图后 RapidOCR 识别手写
+            # —— 扫描页（无/极少文本层）：VLM 先转写，失败/空结果 RapidOCR 兜底
             if not engine_on:
                 pages.append(f"[第 {i} 页]\n（扫描页：OCR 已关闭（ocr.engine=off），请打开原文件查看）")
                 continue
-            if ocr_pages >= max_ocr_pages:
+            if vlm_pages + ocr_pages >= max_ocr_pages:
                 pages.append(f"[第 {i} 页]\n（扫描页：超出 OCR 页数上限（{max_ocr_pages}），已省略，可调大 ocr.pdf_max_ocr_pages 后重试）")
                 continue
             try:
                 png_bytes = page.get_pixmap(dpi=dpi).tobytes("png")
-                result = _get_rapidocr_engine()(_rapidocr_normalize(png_bytes, max_w))
-                texts = [str(x).strip() for x in (getattr(result, "txts", None) or [])
-                         if x and str(x).strip()]
-                pages.append(f"[第 {i} 页｜手写OCR]\n" + ("\n".join(texts) or "（本页未识别到文字，可能为纯图形）"))
-                ocr_pages += 1
-            except RuntimeError as e:
-                pages.append(f"[第 {i} 页]\n（扫描页：{e}，请打开原文件查看）")
-            except Exception as e:  # noqa: BLE001 —— 单页 OCR 失败不影响其余页与流水线
-                LOG.exception("RapidOCR 识别失败：%s 第 %d 页", path.name, i)
-                pages.append(f"[第 {i} 页]\n（第 {i} 页 OCR 失败：{e}）")
-    kind = f"PDF 提取（PyMuPDF+RapidOCR，手写 {ocr_pages} 页）" if ocr_pages else "PDF 文本（PyMuPDF）"
+            except Exception as e:  # noqa: BLE001 —— 单页渲染失败不影响其余页与流水线
+                LOG.exception("PDF 页面渲染失败：%s 第 %d 页", path.name, i)
+                pages.append(f"[第 {i} 页]\n（第 {i} 页渲染失败：{e}）")
+                continue
+            page_text = ""
+            if use_vlm:
+                try:
+                    page_text = _vlm_ocr_png(png_bytes, cfg)
+                    if page_text:
+                        vlm_pages += 1
+                except Exception as e:  # noqa: BLE001 —— VLM 失败降级 RapidOCR，不中断流水线
+                    LOG.warning("VLM OCR 失败（%s 第 %d 页），降级 RapidOCR 兜底：%s",
+                                path.name, i, e)
+            if not page_text:
+                try:
+                    result = _get_rapidocr_engine()(_rapidocr_normalize(png_bytes, max_w))
+                    texts = [str(x).strip() for x in (getattr(result, "txts", None) or [])
+                             if x and str(x).strip()]
+                    page_text = "\n".join(texts) or "（本页未识别到文字，可能为纯图形）"
+                    ocr_pages += 1
+                except RuntimeError as e:
+                    pages.append(f"[第 {i} 页]\n（扫描页：{e}，请打开原文件查看）")
+                    continue
+                except Exception as e:  # noqa: BLE001 —— 单页 OCR 失败不影响其余页与流水线
+                    LOG.exception("RapidOCR 识别失败：%s 第 %d 页", path.name, i)
+                    pages.append(f"[第 {i} 页]\n（第 {i} 页 OCR 失败：{e}）")
+                    continue
+            pages.append(f"[第 {i} 页｜手写OCR]\n" + page_text)
+    if use_vlm and (vlm_pages or ocr_pages):
+        if ocr_pages:  # VLM 试过且有页靠 RapidOCR 兜底（失败/空结果降级）
+            kind = f"PDF 提取（PyMuPDF+VLM→RapidOCR，手写 {vlm_pages + ocr_pages} 页）"
+        else:
+            kind = f"PDF 提取（PyMuPDF+VLM，手写 {vlm_pages} 页）"
+    elif ocr_pages:
+        kind = f"PDF 提取（PyMuPDF+RapidOCR，手写 {ocr_pages} 页）"
+    else:
+        kind = "PDF 文本（PyMuPDF）"
     return kind, "\n\n".join(pages) or "（PDF 中未提取到文本）"
 
 
@@ -1575,8 +1704,20 @@ def run_check(cfg: Dict[str, Any]) -> int:
     probe("LM Studio 连通", lambda: (requests is not None and requests.get(
         cfg["lm_studio"]["base_url"].rstrip("/") + "/models", timeout=4).ok)
         or (_ for _ in ()).throw(RuntimeError(f"{cfg['lm_studio']['base_url']} 未响应")))
+    if str((cfg.get("ocr") or {}).get("engine", "vlm")).strip().lower() == "vlm":
+        def _vlm_probe() -> str:
+            if requests is None:
+                raise RuntimeError("缺少依赖 requests")
+            r = requests.get(_vlm_base_url(cfg.get("ocr")) + "/models", timeout=4)
+            r.raise_for_status()
+            ids = [str(m.get("id", "")) for m in ((r.json() or {}).get("data") or [])]
+            resolved = _vlm_resolve_model(cfg.get("ocr"))
+            if resolved in ids:
+                return f"模型已加载：{resolved}"
+            return f"模型未预加载（{resolved}），首次识别将 JIT 拉起（约 30~60s）"
+        probe("VLM 手写 OCR（LM Studio）", _vlm_probe)
     for mod, name in [("ocrmac", "图像 OCR（ocrmac）"), ("fitz", "PDF（PyMuPDF）"),
-                      ("rapidocr", "手写 OCR（RapidOCR，PDF 扫描页）"),
+                      ("rapidocr", "手写 OCR 兜底（RapidOCR）"),
                       ("docx", "Word（python-docx）"), ("openpyxl", "Excel（openpyxl）"),
                       ("pptx", "PPT（python-pptx）")]:
         probe(name, lambda m=mod: __import__(m) and "")
