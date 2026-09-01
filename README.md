@@ -26,7 +26,7 @@ SmartVault/
 │   ├── uninstall_launchd.sh         # 一键卸载
 │   ├── start_all.sh                 # 前台手动联调（Ctrl+C 一起退出）
 │   └── build_index.py               # 手动索引维护（增量 / 全量重建）
-├── tests/                           # 单元测试：纯函数 / 最近错误扫描 / LLM 客户端 / RAG 流式解码 / OpenAI 兼容层 / 归档保真性 / PDF 双通道 OCR
+├── tests/                           # 单元测试：纯函数 / 最近错误扫描 / LLM 客户端 / RAG 流式解码 / OpenAI 兼容层 / 归档保真性 / PDF 双通道 OCR / 图像 OCR 引擎路由 / 草稿指令块
 ├── models/                          # 本地嵌入模型（bge-small-zh-v1.5，手动下载）
 ├── data/                            # ChromaDB 持久化 + 索引状态
 └── logs/                            # 历史日志存档（v1.7.1 前旧日志；运行日志在 ~/Library/Logs/SmartVault，TCC 保护区内 launchd 打不开）
@@ -99,7 +99,7 @@ cp config.example.json config.json   # 真实配置不入 git（含个人路径�
 把 Markdown 草稿（可连同附件）拖入任意仓库的 `待处理笔记/`，守护进程会：
 
 1. 等文件写入稳定（防抖）并等引用附件到齐（`![[xxx.png]]` / `[t](xxx.pdf)` / HTML `<img src="附件/xxx.png">`）
-2. 按类型解析附件：图像→Vision OCR；音视频→whisper(Metal)；PDF→PyMuPDF 文本层 + 扫描页（**手写中文**）RapidOCR；Office→python-docx/openpyxl/python-pptx；iWork→QuickLook/Preview.pdf
+2. 按类型解析附件：图像→Vision OCR（**潦草手写自动 RapidOCR 兜底**，`ocr.image_engine` 可选 auto/vision/rapidocr）；音视频→whisper(Metal)；PDF→PyMuPDF 文本层 + 扫描页（**手写中文**）RapidOCR；Office→python-docx/openpyxl/python-pptx；iWork→QuickLook/Preview.pdf
 3. 注入「仓库目录树 + ai_context.md（规则与历史索引）」让 LLM 生成 Strict JSON
    （`target_folder / new_filename / summary / tags / link_terms / optimized_content`，全简体中文）
 4. 校验净化（拒绝越权目录、非法文件名），移动附件、写入带 YAML 属性的终稿、备份草稿到 `.smartvault/backup/`（保留最近 100 份）后删除，并自动清理收件箱内残留的空目录（如归档后空掉的 `附件/`）
@@ -108,6 +108,29 @@ cp config.example.json config.json   # 真实配置不入 git（含个人路径�
 **原文不可变（v1.4.0 起默认）**：归档笔记的正文**逐字保留草稿原文**，LLM 只负责提炼元数据（目录归类、文件名、摘要、标签、frontmatter），附件的 OCR/语音转录以折叠引用块附加在文末并标注「以原附件为准」——AI 幻觉再严重也改不动你的原文（v1.3.1 事故教训：LLM「整理」19941 字符长文曾丢失 94% 内容并编造数字）。如希望短文（语音转录、随手记）获得 AI 排版润色，可开启 `processing.content_rewrite: true`：此时不超过 `rewrite_max_chars`（默认 6000 字符）的草稿交由 LLM 整理（仍有逐字保真约束 + 草稿备份兜底），长文一律保留原文。
 
 **确定性双链注入（v1.7.0 起）**：正文中的关键专有名词（软件工具、通信协议、设备型号等）会被自动包裹 `[[双链]]` 建立知识网络——但**包裹由纯代码完成，LLM 只负责列名词清单**（`link_terms`，0~8 个、必须逐字摘自正文）：除新增的 `[[ ]]` 外不动任何字符（逐字保真可校验），LLM 幻觉编造正文没有的名词时正则匹配不到、自动忽略零副作用；代码围栏、行内代码、链接 URL、HTML 标签内的名词不会被注入（防命令/路径被污染）。配置 `processing.auto_wikilinks: false` 可整体关闭。
+
+**图像手写识别（v1.9.0 起）**：图像附件默认双引擎——先 Vision（macOS Neural Engine，印刷体与规整手写效果好、零延迟），未识别到文字或识别失败时自动用 RapidOCR（PP-OCRv6，中文手写友好，与 PDF 扫描页同引擎）兜底重试；两引擎都为空（纯图形图片）则如实占位。手写图片为主的场景建议 `ocr.image_engine: "rapidocr"`（实测逐字扰动模拟潦草手写 28 字：RapidOCR 全对，Vision 错 1 字）；HEIC 格式仅 Vision 支持。
+
+### 草稿指令块：对某篇草稿单独提要求（v1.9.0 起）
+
+每篇草稿可以在**正文最前面**（frontmatter 之后、任何正文内容之前）放一个 ` ```smartvault ` 围栏代码块，块内用自然语言写你对本篇的归档要求，AI 处理时会**优先满足**（优先级：输出契约与安全校验 > 你的要求 > ai_context 规则与一般整理规则）：
+
+````
+```smartvault
+归入「项目管理/会议纪要」目录
+文件名：2026项目启动会
+标签：项目启动、会议纪要
+摘要侧重：行动事项与责任人
+整理正文：是
+```
+````
+
+规则要点：
+
+- **块只认「正文最前」位置**：正文中段出现的 ` ```smartvault ` 块是普通内容，不会被提取（防误删）；围栏词大小写不限
+- **`整理正文：是/否` 是唯一的确定性开关**——仅对本篇覆盖全局 `processing.content_rewrite`（「是」= 允许 AI 整理排版正文，仍受 `rewrite_max_chars` 长度上限与逐字保真约束；想改写正文必须写这一行，**自然语言请求「帮我整理正文」不生效**——正文改写是 v1.3.1 事故红线）
+- **归档终稿不含指令块**：剥离由确定性代码完成（非 AI 决定），原稿完整备份于 `.smartvault/backup/`
+- E2E 实测：归入目录、文件名、标签全部按要求执行；无法满足的要求（如与安全校验冲突）按默认规则处理并在摘要中如实反映
 
 调试命令：
 
