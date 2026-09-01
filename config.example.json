@@ -67,5 +67,5 @@
     { "name": "IT与电脑知识", "path": "/Users/YOUR_NAME/Documents/ObsidianVaults/IT与电脑知识" },
     { "name": "文学与阅读", "path": "/Users/YOUR_NAME/Documents/ObsidianVaults/文学与阅读" }
   ],
-  "log_dir": "logs"
+  "log_dir": "~/Library/Logs/SmartVault"
 }

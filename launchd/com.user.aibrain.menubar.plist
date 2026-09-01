@@ -27,9 +27,11 @@
         <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
     </dict>
 
+    <!-- 日志必须位于 ~/Library/Logs/（@LOG_DIR@）：macOS TCC 禁止 launchd 打开
+         ~/Documents 下的文件，否则作业在 exec 前即以 78 EX_CONFIG 秒退（v1.7.1 教训） -->
     <key>StandardOutPath</key>
-    <string>@PROJECT_DIR@/logs/menubar.stdout.log</string>
+    <string>@LOG_DIR@/menubar.stdout.log</string>
     <key>StandardErrorPath</key>
-    <string>@PROJECT_DIR@/logs/menubar.stderr.log</string>
+    <string>@LOG_DIR@/menubar.stderr.log</string>
 </dict>
 </plist>

@@ -119,7 +119,7 @@ CONFIG_DEFAULTS: Dict[str, Any] = {
             "exclude_folders": [".obsidian", ".trash", "待处理笔记"]},
     "api": {"host": "127.0.0.1", "port": 8788},
     "vaults": [],
-    "log_dir": "logs",
+    "log_dir": "~/Library/Logs/SmartVault",
 }
 
 
@@ -143,7 +143,9 @@ def load_config(path: Path) -> Dict[str, Any]:
         user_cfg = json.load(f)
     cfg = _deep_merge(CONFIG_DEFAULTS, user_cfg or {})
     cfg["_config_dir"] = str(path.parent)
-    cfg["log_dir_abs"] = str((path.parent / cfg.get("log_dir", "logs")).resolve())
+    # log_dir 支持 ~ 开头的绝对路径（v1.7.1 默认迁出 ~/Documents：TCC 禁止 launchd 打开其下日志）
+    _log_dir = Path(cfg.get("log_dir", "~/Library/Logs/SmartVault")).expanduser()
+    cfg["log_dir_abs"] = str((path.parent / _log_dir).resolve())
     return cfg
 
 

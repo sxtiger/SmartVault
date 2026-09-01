@@ -32,7 +32,6 @@ import requests
 import rumps
 
 PROJECT_DIR = Path(__file__).resolve().parent
-LOG_DIR = PROJECT_DIR / "logs"
 UID_NUM = os.getuid()
 LAUNCH_DOMAIN = f"gui/{UID_NUM}"
 AGENTS_DIR = Path.home() / "Library" / "LaunchAgents"
@@ -50,13 +49,29 @@ def _read_config() -> Dict[str, Any]:
 RAG_PORT = int(_read_config().get("api", {}).get("port", 8788))
 
 
+def _resolve_log_dir() -> Path:
+    """日志目录（与 ingest_daemon / rag_api 的 load_config 同一解析规则）。
+
+    macOS 26（Tahoe）起 TCC 禁止 launchd 打开 ~/Documents 下的 stdout/stderr 日志，
+    作业在 exec 前即以 78 EX_CONFIG 秒退且不落任何日志（v1.7.1），
+    故默认迁至 ~/Library/Logs/SmartVault（不受 TCC 保护）。
+    """
+    raw = str(_read_config().get("log_dir", "~/Library/Logs/SmartVault"))
+    p = Path(raw).expanduser()
+    return p if p.is_absolute() else PROJECT_DIR / p
+
+
+LOG_DIR = _resolve_log_dir()
+LOG_DIR.mkdir(parents=True, exist_ok=True)  # 手动直跑时目录可能不存在（launchd 场景由安装脚本预建）
+
+
 class ServiceSpec:
     """一个 launchd 服务的描述：模板 → 安装到 LaunchAgents → 状态查询。"""
 
     def __init__(self, label: str, title: str, log_name: Optional[str], template: str):
         self.label = label
         self.title = title
-        self.log_name = log_name          # 主日志文件名（logs/ 下），None 表示无
+        self.log_name = log_name          # 主日志文件名（LOG_DIR 下），None 表示无
         self.template = PROJECT_DIR / "launchd" / template
 
     @property
@@ -64,9 +79,11 @@ class ServiceSpec:
         return AGENTS_DIR / f"{self.label}.plist"
 
     def render(self) -> Path:
-        """从 launchd/ 模板生成本机 plist（替换 @PROJECT_DIR@ / @PYTHON@ 占位符）。"""
+        """从 launchd/ 模板生成本机 plist（替换 @PROJECT_DIR@ / @PYTHON@ / @LOG_DIR@ 占位符）。"""
         text = self.template.read_text(encoding="utf-8")
-        text = text.replace("@PROJECT_DIR@", str(PROJECT_DIR)).replace("@PYTHON@", PYTHON_BIN)
+        text = (text.replace("@PROJECT_DIR@", str(PROJECT_DIR))
+                    .replace("@PYTHON@", PYTHON_BIN)
+                    .replace("@LOG_DIR@", str(LOG_DIR)))
         self.plist.parent.mkdir(parents=True, exist_ok=True)
         self.plist.write_text(text, encoding="utf-8")
         return self.plist
@@ -220,7 +237,7 @@ def recent_errors(limit: int = 8, consume: bool = True) -> List[str]:
 
     日志是 append-only 且从不轮转，历史错误（如已修复版本的崩溃循环）会
     永久留在文件里——扫描“尾部 N 行”会把陈年旧账当作“最近错误”反复展示。
-    改为按字节偏移增量读取（状态持久化到 logs/.menubar_err_state.json）：
+    改为按字节偏移增量读取（状态持久化到 LOG_DIR/.menubar_err_state.json）：
     - 首次运行（无状态文件）：全部从当前 EOF 起算（清零历史）
     - 新出现的日志文件：从头全量扫描（内容本来就是新的）
     - 文件被截断/轮转（size < 已记录偏移）：从头重读
