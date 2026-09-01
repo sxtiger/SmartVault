@@ -14,16 +14,25 @@ import ingest_daemon as sv  # noqa: E402
 
 
 class FakeEngine:
-    """记录调用并校验输入为 PNG 位图字节的假 RapidOCR 引擎。"""
+    """记录调用的假 RapidOCR 引擎。
+
+    v1.10.0 起宽图先归一化：默认（rapidocr_max_width=800）收到不超过该宽度的
+    ndarray（RGB→BGR 后的 HWC 数组）；关闭归一化（rapidocr_max_width<=0）时
+    收到渲染后的 PNG 字节流（透传原输入）。
+    """
 
     def __init__(self, texts=("识别的手写文本一", "识别的手写文本二")):
         self.calls = []
         self._texts = texts
 
     def __call__(self, img):
-        assert isinstance(img, (bytes, bytearray)) and bytes(img[:4]) == b"\x89PNG", \
-            "传给 RapidOCR 的应为渲染后的 PNG 字节流"
-        self.calls.append(bytes(img))
+        import numpy as np
+        if isinstance(img, (bytes, bytearray)):
+            assert bytes(img[:4]) == b"\x89PNG", "关闭归一化时应透传 PNG 字节流"
+        else:
+            assert isinstance(img, np.ndarray) and img.ndim == 3 and img.shape[1] <= 800, \
+                "宽图应归一化为不超过 rapidocr_max_width 的 ndarray"
+        self.calls.append(img)
         return SimpleNamespace(txts=self._texts)
 
 
