@@ -9,7 +9,7 @@ SmartVault / 智能仓库 —— 模块 A：自动化摄入与归档守护进程
   2. 实时捕获拖入的 Markdown 草稿及附件，按扩展名路由多模态解析：
        图像   (.png/.jpg/.jpeg/.heic...)   -> ocrmac（macOS Vision / Neural Engine）
        音视频 (.mp3/.m4a/.wav/.mp4/.mov..) -> mlx-whisper（Metal）/ openai-whisper（备选）
-       PDF    (.pdf)                       -> PyMuPDF(fitz)
+       PDF    (.pdf)                       -> PyMuPDF(fitz) 文本层；扫描页（中文手写）-> RapidOCR
        Office (.docx/.xlsx/.pptx)          -> python-docx / openpyxl / python-pptx
        iWork  (.pages/.numbers/.key)       -> 解剖 Zip 包/包目录 -> QuickLook/Preview.pdf -> fitz
   3. 动态扫描仓库目录树（一/二级）+ 读取 ai_context.md 人设与历史索引，注入 Prompt，
@@ -106,6 +106,7 @@ CONFIG_DEFAULTS: Dict[str, Any] = {
     "tree_depth": 2,
     "obsidian": {"wake_enabled": True},
     "vision": {"language_preference": ["zh-Hans", "en-US"]},
+    "ocr": {"engine": "rapidocr", "pdf_dpi": 200, "pdf_max_ocr_pages": 20, "pdf_min_text_chars": 20},
     "whisper": {"backend": "auto", "mlx_model": "mlx-community/whisper-large-v3-turbo",
                 "openai_model": "small", "language": "zh"},
     "processing": {"debounce_seconds": 8, "quiet_seconds": 3, "attachment_wait_timeout": 30,
@@ -374,16 +375,74 @@ def transcribe_media(path: Path, wcfg: Dict[str, Any]) -> str:
     raise RuntimeError("语音转写失败（" + "；".join(errors) + "），请安装 mlx-whisper 或 openai-whisper")
 
 
-def extract_pdf(path: Path) -> str:
-    """PDF 全文提取：PyMuPDF(fitz)，零弹窗静默读取。"""
+_RAPIDOCR_STATE: Dict[str, Any] = {}  # {"engine": 引擎单例|None, "error": 初始化失败原因|None}
+
+
+def _get_rapidocr_engine():
+    """RapidOCR 引擎惰性单例：模型内置于 wheel（PP-OCRv6，简体中文手写友好，离线可用）。
+
+    首次构建约 1~2s，进程内复用；初始化失败（未安装/模型损坏）时缓存失败原因并
+    以 RuntimeError 上抛，由调用方降级处理——OCR 永远不该中断归档流水线。
+    """
+    if "engine" not in _RAPIDOCR_STATE:
+        try:
+            from rapidocr import RapidOCR
+            LOG.info("初始化 RapidOCR 引擎（PP-OCRv6，简体中文手写识别）")
+            _RAPIDOCR_STATE["engine"] = RapidOCR()
+        except ImportError:
+            _RAPIDOCR_STATE["engine"] = None
+            _RAPIDOCR_STATE["error"] = "未安装 rapidocr（pip install rapidocr）"
+        except Exception as e:  # noqa: BLE001 —— 模型加载失败不中断流水线
+            LOG.exception("RapidOCR 引擎初始化失败")
+            _RAPIDOCR_STATE["engine"] = None
+            _RAPIDOCR_STATE["error"] = str(e)
+    if _RAPIDOCR_STATE["engine"] is None:
+        raise RuntimeError(_RAPIDOCR_STATE.get("error") or "RapidOCR 初始化失败")
+    return _RAPIDOCR_STATE["engine"]
+
+
+def extract_pdf(path: Path, ocr_cfg: Optional[Dict[str, Any]] = None) -> Tuple[str, str]:
+    """PDF 提取（v1.8.0 双通道）：文本层优先（PyMuPDF）；扫描页（含中文手写）RapidOCR 兜底。
+
+    逐页判定：文本层字符数 >= pdf_min_text_chars 直接取文本（电子 PDF 零成本、逐字保真）；
+    低于阈值视为扫描页（手写笔记 PDF 即此类）——以 pdf_dpi 渲染成 PNG 交给 RapidOCR。
+    返回 (类型标签, 全文)；OCR 关闭/不可用/单页失败一律降级为占位说明，绝不中断归档。
+    """
     import fitz
+    cfg = ocr_cfg or {}
+    dpi = max(72, int(cfg.get("pdf_dpi", 200)))
+    max_ocr_pages = max(0, int(cfg.get("pdf_max_ocr_pages", 20)))
+    min_chars = max(1, int(cfg.get("pdf_min_text_chars", 20)))
+    engine_on = str(cfg.get("engine", "rapidocr")).strip().lower() not in ("off", "disable", "false")
     pages: List[str] = []
+    ocr_pages = 0
     with fitz.open(str(path)) as doc:
+        total = len(doc)
         for i, page in enumerate(doc, 1):
             t = page.get_text("text").strip()
-            if t:
+            if len(t) >= min_chars:
                 pages.append(f"[第 {i} 页]\n{t}")
-    return "\n\n".join(pages) or "（PDF 中未提取到文本，可能为纯扫描件）"
+                continue
+            # —— 扫描页（无/极少文本层）：渲染位图后 RapidOCR 识别手写
+            if not engine_on:
+                pages.append(f"[第 {i} 页]\n（扫描页：OCR 已关闭（ocr.engine=off），请打开原文件查看）")
+                continue
+            if ocr_pages >= max_ocr_pages:
+                pages.append(f"[第 {i} 页]\n（扫描页：超出 OCR 页数上限（{max_ocr_pages}），已省略，可调大 ocr.pdf_max_ocr_pages 后重试）")
+                continue
+            try:
+                result = _get_rapidocr_engine()(page.get_pixmap(dpi=dpi).tobytes("png"))
+                texts = [str(x).strip() for x in (getattr(result, "txts", None) or [])
+                         if x and str(x).strip()]
+                pages.append(f"[第 {i} 页｜手写OCR]\n" + ("\n".join(texts) or "（本页未识别到文字，可能为纯图形）"))
+                ocr_pages += 1
+            except RuntimeError as e:
+                pages.append(f"[第 {i} 页]\n（扫描页：{e}，请打开原文件查看）")
+            except Exception as e:  # noqa: BLE001 —— 单页 OCR 失败不影响其余页与流水线
+                LOG.exception("RapidOCR 识别失败：%s 第 %d 页", path.name, i)
+                pages.append(f"[第 {i} 页]\n（第 {i} 页 OCR 失败：{e}）")
+    kind = f"PDF 提取（PyMuPDF+RapidOCR，手写 {ocr_pages} 页）" if ocr_pages else "PDF 文本（PyMuPDF）"
+    return kind, "\n\n".join(pages) or "（PDF 中未提取到文本）"
 
 
 def extract_docx(path: Path) -> str:
@@ -475,7 +534,7 @@ def dispatch_attachment(path: Path, cfg: Dict[str, Any]) -> Tuple[str, str]:
         elif ext in MEDIA_EXTS:
             kind, text = "音视频转录（whisper）", transcribe_media(path, cfg["whisper"])
         elif ext == ".pdf":
-            kind, text = "PDF 文本（PyMuPDF）", extract_pdf(path)
+            kind, text = extract_pdf(path, cfg.get("ocr") or {})
         elif ext == ".docx":
             kind, text = OFFICE_KIND_MAP[ext], extract_docx(path)
         elif ext == ".xlsx":
@@ -1348,6 +1407,7 @@ def run_check(cfg: Dict[str, Any]) -> int:
         cfg["lm_studio"]["base_url"].rstrip("/") + "/models", timeout=4).ok)
         or (_ for _ in ()).throw(RuntimeError(f"{cfg['lm_studio']['base_url']} 未响应")))
     for mod, name in [("ocrmac", "图像 OCR（ocrmac）"), ("fitz", "PDF（PyMuPDF）"),
+                      ("rapidocr", "手写 OCR（RapidOCR，PDF 扫描页）"),
                       ("docx", "Word（python-docx）"), ("openpyxl", "Excel（openpyxl）"),
                       ("pptx", "PPT（python-pptx）")]:
         probe(name, lambda m=mod: __import__(m) and "")

@@ -20,6 +20,12 @@
   "vision": {
     "language_preference": ["zh-Hans", "en-US"]
   },
+  "ocr": {
+    "engine": "rapidocr",
+    "pdf_dpi": 200,
+    "pdf_max_ocr_pages": 20,
+    "pdf_min_text_chars": 20
+  },
   "whisper": {
     "backend": "auto",
     "mlx_model": "mlx-community/whisper-large-v3-turbo",
