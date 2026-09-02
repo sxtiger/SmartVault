@@ -47,11 +47,14 @@
     "fallback_folder": "未分类",
     "content_rewrite": false,
     "rewrite_max_chars": 6000,
-    "auto_wikilinks": true
+    "auto_wikilinks": true,
+    "attachment_digest_enabled": true,
+    "attachment_digest_batch_chars": 4000
   },
   "limits": {
     "raw_note_max_chars": 30000,
-    "attachment_max_chars": 12000
+    "attachment_max_chars": 100000,
+    "attachment_prompt_max_chars": 12000
   },
   "rag": {
     "enabled": true,

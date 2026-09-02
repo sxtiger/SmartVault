@@ -119,8 +119,10 @@ CONFIG_DEFAULTS: Dict[str, Any] = {
     "processing": {"debounce_seconds": 8, "quiet_seconds": 3, "attachment_wait_timeout": 30,
                    "attachments_subfolder": "附件", "allow_new_folder": True, "max_folder_depth": 2,
                    "fallback_folder": "未分类", "content_rewrite": False, "rewrite_max_chars": 6000,
-                   "auto_wikilinks": True},
-    "limits": {"raw_note_max_chars": 30000, "attachment_max_chars": 12000},
+                   "auto_wikilinks": True, "attachment_digest_enabled": True,
+                   "attachment_digest_batch_chars": 4000},
+    "limits": {"raw_note_max_chars": 30000, "attachment_max_chars": 100000,
+               "attachment_prompt_max_chars": 12000},
     "rag": {"enabled": True, "embedding_model_path": "models/bge-small-zh-v1.5",
             "embedding_device": "mps", "chroma_dir": "data/chroma", "collection_name": "smartvault",
             "chunk_size": 500, "chunk_overlap": 80, "top_k": 4, "rescan_seconds": 300,
@@ -779,10 +781,176 @@ def dispatch_attachment(path: Path, cfg: Dict[str, Any]) -> Tuple[str, str]:
             text = f"（{path.name} 为「{ext}」类型，暂不支持自动解析；文件已随笔记归档至附件目录，请打开原文件查看）"
         LOG.info("附件解析完成 [%s] %s（%.1fs，%d 字符）", kind, path.name,
                  time.time() - started, len(text))
-        return kind, _clip_text(text, int(cfg["limits"]["attachment_max_chars"]))
+        return kind, text
     except Exception as e:  # noqa: BLE001
         LOG.exception("附件解析失败：%s", path.name)
         return "解析失败", f"（附件 {path.name} 解析失败：{e}）"
+
+
+# ================================================================== 长附件分批提炼（v1.12.0 Map-Reduce）
+_PAGE_NUM_RE = re.compile(r"\[第 (\d+) 页")
+_PAGE_SPLIT_RE = re.compile(r"(?m)^(?=\[第 \d+ 页)")
+
+_DIGEST_PROMPT = (
+    "提炼以下附件转录文本的要点（300 字以内）：\n"
+    "1. 提取关键事实、数字、人名、结论，逐字取材于原文，严禁编造\n"
+    "2. 保持原文事实忠实，不改变原意\n"
+    "3. 只输出要点本身，不要任何解释或前后缀"
+)
+
+
+def _split_transcript_pages(text: str) -> List[str]:
+    """按 [第 N 页] / [第 N 页｜手写OCR] 页标记确定性切分转录文本。
+
+    extract_pdf 输出天然携带该标记；无标记时整段作为单页返回。
+    """
+    if not text:
+        return []
+    parts = _PAGE_SPLIT_RE.split(text)
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _extract_page_num(page_text: str) -> int:
+    """从页面文本 [第 N 页] 标记中提取页码；无标记返回 0。"""
+    m = _PAGE_NUM_RE.search(page_text)
+    return int(m.group(1)) if m else 0
+
+
+def _batch_pages(pages: List[str], batch_chars: int) -> List[Tuple[int, int, str]]:
+    """贪心合并页面至 batch_chars 字符/批；超宽单页独立成批。
+
+    返回 [(起始页码, 终止页码, 拼接文本)]；无页码标记的页面页码为 0。
+    """
+    if not pages or batch_chars <= 0:
+        return []
+    batches: List[Tuple[int, int, str]] = []
+    cur: List[str] = []
+    cur_len = 0
+    cur_start = 0
+    for page in pages:
+        pnum = _extract_page_num(page)
+        if not cur:
+            cur = [page]
+            cur_len = len(page)
+            cur_start = pnum
+        elif cur_len + len(page) + 2 > batch_chars:
+            batches.append((cur_start, _extract_page_num(cur[-1]), "\n\n".join(cur)))
+            cur = [page]
+            cur_len = len(page)
+            cur_start = pnum
+        else:
+            cur.append(page)
+            cur_len += len(page) + 2  # +2 为 \n\n 分隔
+    if cur:
+        batches.append((cur_start, _extract_page_num(cur[-1]), "\n\n".join(cur)))
+    return batches
+
+
+def digest_attachment_text(text: str, cfg: Dict[str, Any],
+                           client: LLMClient) -> Optional[str]:
+    """分批提炼长附件转录文本（Map-Reduce），返回拼接要点或 None（整体失败）。
+
+    触发：文本长度 > attachment_prompt_max_chars 且 attachment_digest_enabled=true。
+    切分：按 [第 N 页] 页标记确定性切分，贪心合并至 batch_chars 字符/批。
+    Map：每批调 LLM（thinking=False, max_tokens=1024, temperature=0.3）提炼要点，
+         每批要点带页码范围标注（助元数据 LLM 建立文档结构感）。
+    Reduce：各批要点拼接；若仍超注入上限再做一轮合并提炼，失败则头裁剪。
+    降级：单批失败 → 该批降级为头 300 字切片；整体失败 → None（调用方回退头裁剪）。
+    """
+    proc = cfg.get("processing") or {}
+    if not bool(proc.get("attachment_digest_enabled", True)):
+        return None
+    batch_chars = int(proc.get("attachment_digest_batch_chars", 4000))
+    prompt_cap = int(cfg["limits"]["attachment_prompt_max_chars"])
+
+    pages = _split_transcript_pages(text)
+    if not pages:
+        return None
+    batches = _batch_pages(pages, batch_chars)
+    if not batches:
+        return None
+
+    digests: List[str] = []
+    total = len(batches)
+    for idx, (start, end, batch_text) in enumerate(batches, 1):
+        label = f"第 {start}-{end} 页" if start != end else f"第 {start} 页"
+        LOG.info("附件要点提炼进度：%d/%d（%s，%d 字符）", idx, total, label, len(batch_text))
+        try:
+            msg = [{"role": "user", "content": f"{_DIGEST_PROMPT}\n\n---\n{batch_text}"}]
+            result = client.chat(msg, max_tokens=1024, temperature=0.3, thinking=False)
+            result = result.strip()
+            if not result:
+                LOG.warning("附件要点提炼批次 %s 返回空，降级头切片", label)
+                result = _clip_text(batch_text, 300)
+        except Exception as e:  # noqa: BLE001 —— 单批失败不中断整体
+            LOG.warning("附件要点提炼批次 %s 失败，降级头切片：%s", label, e)
+            result = _clip_text(batch_text, 300)
+        digests.append(f"{label}：{result}")
+
+    joined = "\n".join(digests)
+
+    # Reduce：拼接后仍超注入上限（超大文档）→ 再做一轮合并提炼
+    if len(joined) > prompt_cap:
+        LOG.info("附件要点拼接 %d 字符仍超注入上限 %d，启动合并提炼", len(joined), prompt_cap)
+        try:
+            msg = [{"role": "user", "content": f"{_DIGEST_PROMPT}\n\n---\n{joined}"}]
+            joined = client.chat(msg, max_tokens=1024, temperature=0.3,
+                                 thinking=False).strip()
+            if not joined:
+                LOG.warning("附件要点合并提炼返回空，降级头裁剪")
+                joined = _clip_text("\n".join(digests), prompt_cap)
+        except Exception as e:  # noqa: BLE001 —— 合并失败不中断
+            LOG.warning("附件要点合并提炼失败，降级头裁剪：%s", e)
+            joined = _clip_text("\n".join(digests), prompt_cap)
+
+    return joined if joined else None
+
+
+def prepare_attachment_blocks(name: str, kind: str, text: str,
+                              cfg: Dict[str, Any],
+                              client: LLMClient) -> Tuple[List[str], str]:
+    """准备附件的保全块列表与注入块（v1.12.0）。
+
+    - 短附件（≤ attachment_prompt_max_chars）：直注原文，保全块 = [全文块]；
+    - 长附件且提炼开启：提炼成功 → 保全块 = [速览块, 全文块]（速览在前、全文在后），
+      注入块 = 要点提炼（原文 N 字，全文见文末转录块）；提炼失败 → 降级头裁剪；
+    - 长附件且提炼关闭：保全块 = [全文块]，注入块 = 头裁剪。
+
+    返回 (保全块列表, 注入块文本)；保全块列表按终稿落盘顺序排列。
+    build_preserved_content 逐块渲染为独立 ``> [!quote]-`` 折叠块，无需改该函数。
+    """
+    limits = cfg["limits"]
+    prompt_cap = int(limits["attachment_prompt_max_chars"])
+    preserve_cap = int(limits["attachment_max_chars"])
+    proc = cfg.get("processing") or {}
+    digest_enabled = bool(proc.get("attachment_digest_enabled", True))
+
+    # 短附件：直注原文
+    if len(text) <= prompt_cap:
+        block = f"◆ 附件「{name}」｜{kind}\n{text}"
+        return [block], block
+
+    # 长附件
+    if digest_enabled:
+        digest = digest_attachment_text(text, cfg, client)
+        if digest:
+            # 提炼成功：速览块在前、全文块在后（§2.3）
+            speed_block = (f"◆ 附件「{name}」｜要点提炼"
+                           f"（机器生成速览，若有出入以原附件为准）\n{digest}")
+            full_block = f"◆ 附件「{name}」｜{kind}\n{_clip_text(text, preserve_cap)}"
+            inject_block = (f"◆ 附件「{name}」｜要点提炼"
+                            f"（原文 {len(text)} 字，全文见文末转录块）\n{digest}")
+            LOG.info("附件要点速览块将随终稿落盘：%s（速览 %d 字 + 全文 %d 字）",
+                     name, len(digest), min(len(text), preserve_cap))
+            return [speed_block, full_block], inject_block
+        LOG.warning("附件要点提炼整体失败，降级头裁剪注入：%s", name)
+
+    # 长附件未提炼或提炼失败：头裁剪注入，全文保全
+    full_block = f"◆ 附件「{name}」｜{kind}\n{_clip_text(text, preserve_cap)}"
+    inject_block = f"◆ 附件「{name}」｜{kind}\n{_clip_text(text, prompt_cap)}"
+    if len(text) > preserve_cap:
+        LOG.info("附件保全上限触发：%s（%d 字 → %d 字）", name, len(text), preserve_cap)
+    return [full_block], inject_block
 
 
 # ================================================================== 目录树与上下文
@@ -935,14 +1103,17 @@ class LLMClient:
 
     def chat(self, messages: List[Dict[str, str]],
              json_schema: Optional[Dict[str, Any]] = None,
-             temperature: Optional[float] = None) -> str:
+             temperature: Optional[float] = None,
+             max_tokens: Optional[int] = None,
+             thinking: Optional[bool] = None) -> str:
         payload: Dict[str, Any] = {
             "model": self.model,
-            "messages": apply_thinking_switch(messages, self.thinking),
+            "messages": apply_thinking_switch(
+                messages, self.thinking if thinking is None else thinking),
             "temperature": self.temperature if temperature is None else temperature,
             "top_p": self.top_p,
             "top_k": self.top_k,
-            "max_tokens": self.max_tokens,
+            "max_tokens": self.max_tokens if max_tokens is None else max_tokens,
             "stream": False,
         }
         if json_schema and self.structured:
@@ -1420,20 +1591,25 @@ def run_pipeline(cfg: Dict[str, Any], client: LLMClient, vault: Vault,
         LOG.info("等待附件就绪：%s（剩余 %.0fs）", missing, deadline - time.time())
         time.sleep(2)
 
-    # 2) 多模态解析附件
-    attach_blocks: List[str] = []
+    # 2) 多模态解析附件（v1.12.0：保全与注入解耦 + 分批提炼）
+    attach_blocks: List[str] = []        # 保全侧：文末转录折叠块（全文 + 要点速览）
+    attach_blocks_prompt: List[str] = [] # 注入侧：LLM 元数据 Prompt（直注/提炼/头裁剪）
     attachments: List[Tuple[str, Path]] = []  # (引用名, 实际路径)
     for ref in refs:
         p = resolve_attachment(vault.inbox, ref)
         if p is None:
             LOG.warning("附件未找到，保留原引用：%s", ref)
-            attach_blocks.append(f"◆ 附件「{ref}」｜未找到\n（该附件未出现在收件箱中）")
+            not_found = f"◆ 附件「{ref}」｜未找到\n（该附件未出现在收件箱中）"
+            attach_blocks.append(not_found)
+            attach_blocks_prompt.append(not_found)
             continue
         if not _wait_file_stable(p, checks=6, interval=1.0):
             LOG.warning("附件大小持续变化，按当前状态尽力解析：%s", p.name)
         kind, text = dispatch_attachment(p, cfg)
         attachments.append((ref, p))
-        attach_blocks.append(f"◆ 附件「{p.name}」｜{kind}\n{text}")
+        blocks, inject = prepare_attachment_blocks(p.name, kind, text, cfg, client)
+        attach_blocks.extend(blocks)
+        attach_blocks_prompt.append(inject)
 
     # 3) 组装动态上下文（原文保留模式：默认所有草稿正文逐字保留，LLM 只产元数据，
     #    杜绝任何改写导致的丢内容与幻觉——见 v1.3.1 事故复盘；短文 AI 润色为可选开关）
@@ -1451,7 +1627,7 @@ def run_pipeline(cfg: Dict[str, Any], client: LLMClient, vault: Vault,
     if per_note_rewrite and keep_original:
         LOG.warning("指令块要求整理正文，但正文 %d 字符超过 rewrite_max_chars（%d）上限，本篇仍保留原文",
                     len(raw), rewrite_max)
-    user_prompt = build_user_prompt(vault.name, md_path.name, raw, attach_blocks,
+    user_prompt = build_user_prompt(vault.name, md_path.name, raw, attach_blocks_prompt,
                                     tree_text, ctx_text,
                                     int(cfg["limits"]["raw_note_max_chars"]),
                                     keep_original_content=keep_original,
@@ -1465,8 +1641,8 @@ def run_pipeline(cfg: Dict[str, Any], client: LLMClient, vault: Vault,
     if keep_original:
         # 原文保留模式：正文逐字保留草稿原文（附件转录折叠附加于文末），无视 LLM 返回
         meta["optimized_content"] = build_preserved_content(raw, attach_blocks)
-        LOG.info("原文保留模式（%d 字符，附件转录 %d 份）：正文保留原文，LLM 仅提供元数据",
-                 len(raw), len(attach_blocks))
+        LOG.info("原文保留模式（%d 字符，附件 %d 份）：正文保留原文，LLM 仅提供元数据",
+                 len(raw), len(attach_blocks_prompt))
     else:
         # 短文模式：LLM 万一未返回正文也回退原文，任何情况下不允许内容丢失
         meta["optimized_content"] = meta["optimized_content"].strip() or raw
