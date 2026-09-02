@@ -3,10 +3,10 @@
 macOS（Apple Silicon）上 100% 本地运行的 Obsidian AI 知识管理系统。
 由两个模块组成，推理全部交给本机 **LM Studio**（`http://localhost:1234/v1`），零外部网络请求。
 
-| 模块 | 文件 | 职责 |
-|---|---|---|
-| A. 摄入与归档守护进程 | `ingest_daemon.py` | watchdog 监听多 Vault 的「待处理笔记」收件箱，多模态解析附件，LLM 提炼为 Strict JSON，自动归类落盘并唤醒 Obsidian |
-| B. 对话式知识查询服务 | `rag_api.py` | FastAPI 本地 RAG：中文嵌入 + ChromaDB 向量检索 + LM Studio 生成；自带浏览器聊天界面（`GET /ui`），`POST /ask` 返回带引用来源的回答（支持 SSE 流式）；另暴露 OpenAI 兼容 `/v1/chat/completions`，可接 BMO Chatbot 等 Obsidian 插件 |
+| 模块                  | 文件               | 职责                                                                                                                                                                                                                              |
+| --------------------- | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A. 摄入与归档守护进程 | `ingest_daemon.py` | watchdog 监听多 Vault 的「待处理笔记」收件箱，多模态解析附件，LLM 提炼为 Strict JSON，自动归类落盘并唤醒 Obsidian                                                                                                                 |
+| B. 对话式知识查询服务 | `rag_api.py`       | FastAPI 本地 RAG：中文嵌入 + ChromaDB 向量检索 + LM Studio 生成；自带浏览器聊天界面（`GET /ui`），`POST /ask` 返回带引用来源的回答（支持 SSE 流式）；另暴露 OpenAI 兼容 `/v1/chat/completions`，可接 BMO Chatbot 等 Obsidian 插件 |
 
 ```
 SmartVault/
@@ -26,7 +26,7 @@ SmartVault/
 │   ├── uninstall_launchd.sh         # 一键卸载
 │   ├── start_all.sh                 # 前台手动联调（Ctrl+C 一起退出）
 │   └── build_index.py               # 手动索引维护（增量 / 全量重建）
-├── tests/                           # 单元测试：纯函数 / 最近错误扫描 / LLM 客户端 / RAG 流式解码 / OpenAI 兼容层 / 归档保真性 / PDF 双通道 OCR / 图像 OCR 引擎路由 / OCR 输入归一化 / VLM 主引擎与 RapidOCR 兜底 / 草稿指令块
+├── tests/                           # 单元测试：纯函数 / 最近错误扫描 / LLM 客户端 / RAG 流式解码 / OpenAI 兼容层 / 归档保真性 / PDF 双通道 OCR / 图像 OCR 引擎路由 / OCR 输入归一化 / VLM 主引擎与 RapidOCR 兜底 / 草稿指令块 / 长附件分批提炼
 ├── models/                          # 本地嵌入模型（bge-small-zh-v1.5，手动下载）
 ├── data/                            # ChromaDB 持久化 + 索引状态
 └── logs/                            # 历史日志存档（v1.7.1 前旧日志；运行日志在 ~/Library/Logs/SmartVault，TCC 保护区内 launchd 打不开）
@@ -59,7 +59,7 @@ pip install -r requirements.txt
 - 下载并加载对话模型（如 `Qwen2.5-7B-Instruct`，24GB 内存推荐 Q4_K_M 量化；Qwen3 系混合思考模型同样适用）
 - 开启本地服务器（Developer → Start Server，默认端口 1234）
 - `config.json` 中 `lm_studio.chat_model` 需与已加载模型名一致
-- **Qwen3 推理调优（v1.6.2）**：采样参数由 SmartVault 每次请求显式下发，LM Studio server 端无需设置——归档侧用 thinking 模式官方推荐值（temp 0.6 / top_p 0.95 / top_k 20，`lm_studio.*`），问答侧默认经 `/no_think` 软开关关闭思考并用非 thinking 推荐值（temp 0.7 / top_p 0.8 / top_k 20，`rag.chat_*`，实测全链路 5.6s）；嫌归档慢可把 `lm_studio.thinking` 设为 `false`
+- **Qwen3 推理调优（v1.6.2）**：采样参数由 SmartVault 每次请求显式下发，LM Studio server 端无需设置——归档侧用 thinking 模式官方推荐值（temp 0.6 / top*p 0.95 / top_k 20，`lm_studio.*`），问答侧默认经 `/no_think` 软开关关闭思考并用非 thinking 推荐值（temp 0.7 / top_p 0.8 / top_k 20，`rag.chat\*\*`，实测全链路 5.6s）；嫌归档慢可把 `lm_studio.thinking`设为`false`
 
 ### 4. 本地嵌入模型（一次性联网下载，之后完全离线）
 
@@ -116,6 +116,8 @@ cp config.example.json config.json   # 真实配置不入 git（含个人路径�
 **手写识别输入归一化（v1.10.0 起）**：RapidOCR 识别前会把宽超 `ocr.rapidocr_max_width`（默认 800px，LANCZOS 降采样、EXIF 方向转正）的图自动缩小——PP-OCRv6 对 ~600-1000px 宽的输入最稳，大图直喂反而丢细节。真实潦草手写页实测：字准确率 52.5% → 67.6%（+15 个百分点），清晰字迹 97.1% 无损，耗时不变（~0.4s）；黑白极潦草复核样本上无增益也无害（此时瓶颈在字迹潦草度本身，非分辨率）。适用于图像附件与 PDF 扫描页两条路径；极潦草字迹可在 600~1000 区间微调，`0` 表示关闭。
 
 **手写 PDF 主引擎 Qwen2.5-VL（v1.11.0 起）**：PDF 扫描页默认先经 LM Studio 用 `mlx-community/Qwen2.5-VL-7B-Instruct-4bit` 逐字转写（`pdf_dpi` 原分辨率、temperature=0、防漏行指令），失败或空结果时自动降级 RapidOCR（PP-OCRv6 + 800px 归一化）兜底——LM Studio 未启动、模型未加载或超时都不断档，转录 kind 会如实标注实际引擎（`PyMuPDF+VLM` / `VLM→RapidOCR`）。动机：RapidOCR 在极潦草手写上字符准确率仅 21~44%、专有名词与人名几乎全崩，Qwen2.5-VL 靠语言先验词级反超（实测 67% vs 54%）；代价是热推理 3.6~6s/页、JIT 冷启约 40s、约 5.5GB 显存常驻、偶发同义改写式幻觉——转录仅作检索辅助，以原附件为准。建议在 LM Studio 中把归档模型与 VLM 同时 `lms load`（24GB 内存可容纳），避免模型切换开销；不装 VLM 时全程自动 RapidOCR，无需改任何配置。
+
+**长附件分批提炼与要点速览（v1.12.0 起）**：100+ 页手写 PDF 等超长附件转录文本不再被硬截断——附件文本超过 LLM 注入上限（`attachment_prompt_max_chars` 默认 12000 字符）时，自动按 `[第 N 页]` 页标记切分、每 ~4000 字一批调 LLM 提炼 300 字要点（Map-Reduce），拼接后注入元数据 Prompt 供 LLM 产目录/摘要/标签，而**全文转录完整保全**在终稿文末折叠块（上限 100000 字符）。提炼过的附件还会在全文块之前追加一个独立折叠「要点速览」块，供快速浏览与 RAG 主题级召回。提炼失败自动降级为头裁剪注入，全文转录不受影响；小附件（≤注入上限）直接注入原文，不触发提炼。原文保留模式下全文转录不经过模型，分批提炼只影响元数据，零保真风险。
 
 ### 草稿指令块：对某篇草稿单独提要求（v1.9.0 起）
 
@@ -182,24 +184,24 @@ http://127.0.0.1:8788/ui
 python rag_api.py        # 前台手动启动 http://127.0.0.1:8788，后台自动增量索引
 ```
 
-| 接口 | 说明 |
-|---|---|
-| `GET /ui` | **浏览器聊天界面（日常使用推荐入口）**：流式回答 + 来源引用，零依赖离线单页 |
-| `POST /ask` | `{"query": "...", "top_k": 4, "stream": false}` → `{"answer", "sources": [{path, title, distance}]}` |
-| `POST /ask`（流式） | `"stream": true` → SSE：先 `event: sources`，再 `event: message` 增量，最后 `event: done` |
-| `GET /v1/models` | OpenAI 兼容模型列表（固定暴露 `smartvault-rag`） |
+| 接口                        | 说明                                                                                                             |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `GET /ui`                   | **浏览器聊天界面（日常使用推荐入口）**：流式回答 + 来源引用，零依赖离线单页                                      |
+| `POST /ask`                 | `{"query": "...", "top_k": 4, "stream": false}` → `{"answer", "sources": [{path, title, distance}]}`             |
+| `POST /ask`（流式）         | `"stream": true` → SSE：先 `event: sources`，再 `event: message` 增量，最后 `event: done`                        |
+| `GET /v1/models`            | OpenAI 兼容模型列表（固定暴露 `smartvault-rag`）                                                                 |
 | `POST /v1/chat/completions` | **OpenAI 兼容入口**：标准 `messages` 格式（支持 `stream` SSE 流式），供 BMO Chatbot 等任意 OpenAI 协议客户端直连 |
-| `POST /reindex` | `{"rebuild": false}` 增量同步；`{"rebuild": true}` 全量重建 |
-| `GET /status` | 索引文件数 / 分块数 / 最近同步时间 |
-| `GET /health` | LM Studio 与嵌入模型健康状态 |
+| `POST /reindex`             | `{"rebuild": false}` 增量同步；`{"rebuild": true}` 全量重建                                                      |
+| `GET /status`               | 索引文件数 / 分块数 / 最近同步时间                                                                               |
+| `GET /health`               | LM Studio 与嵌入模型健康状态                                                                                     |
 
 Obsidian 插件（Templater / 自定义脚本）中调用示例：
 
 ```javascript
-const res = await fetch("http://127.0.0.1:8788/ask", {
-  method: "POST",
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({ query: "SmartVault 的隐私原则是什么？" }),
+const res = await fetch('http://127.0.0.1:8788/ask', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ query: 'SmartVault 的隐私原则是什么？' }),
 });
 const { answer, sources } = await res.json();
 ```
@@ -208,11 +210,11 @@ const { answer, sources } = await res.json();
 
 服务自带 OpenAI 兼容适配层，BMO Chatbot 无需任何改造即可直连。插件设置 → **REST API Connection**：
 
-| 设置项 | 填写值 |
-|---|---|
-| **API Key** | 留空（本地服务不鉴权） |
-| **REST API URL** | `http://127.0.0.1:8788/v1` |
-| **Enable Stream** | 建议开启（流式逐字输出） |
+| 设置项            | 填写值                     |
+| ----------------- | -------------------------- |
+| **API Key**       | 留空（本地服务不鉴权）     |
+| **REST API URL**  | `http://127.0.0.1:8788/v1` |
+| **Enable Stream** | 建议开启（流式逐字输出）   |
 
 填完 URL 后插件会自动拉取模型列表，在聊天窗顶部的模型下拉框选择 **smartvault-rag**（REST API Models 分组）即可开始提问。
 
@@ -251,17 +253,17 @@ open SmartVaultMenuBar.app           # 安装/唤醒 launchd 代理 → 状态�
 
 功能一览：
 
-| 菜单项 | 说明 |
-|---|---|
-| 状态图标 `● ◐ ○ ⚠` | 全部运行 / 部分运行 / 全部停止 / 异常（崩溃循环或 RAG 未就绪），每 5 秒自动刷新 |
-| 启动 / 停止 / 重启全部 | 一键 bootstrap/bootout 两个 launchd 服务（启动幂等：已在运行不会重启） |
-| 摄入守护进程 / RAG 服务 子菜单 | 单独启停、重启、卸载（移除开机自启）、Terminal 实时日志 |
-| 🧹 清理已删笔记残留（同步索引） | 增量同步 RAG：移除已删除笔记的向量块 + 剔除 ai_context.md 失效归档条目（后台每 5 分钟也会自动执行；删除/清理测试笔记后点它立即生效） |
-| ♻️ 重建 RAG 索引（清空后重建） | 确认后清空整个向量库，再按当前仓库实际存在的笔记全量重建；清空测试库后点它让索引归零 |
-| 🔍 综合健康检查 | config / Vault 路径 / 嵌入模型 / LM Studio 端口 / `/health` `/status` / 进程退出码 逐项 ✔/✘ |
-| ⚠️ 最近错误分析 | 增量监测 `~/Library/Logs/SmartVault/*.log` 自上次检查以来新增的 ERROR / Traceback / 启动失败（连续重复自动去重；历史旧错误不重复告警） |
-| 🖥 开机自启：菜单栏控制台 | 控制台自身的登录项开关（安装 `com.user.aibrain.menubar`） |
-| 🧹 卸载全部 SmartVault 服务 | 停止并移除全部三个 launchd 登录项（代码与数据不受影响） |
+| 菜单项                          | 说明                                                                                                                                   |
+| ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| 状态图标 `● ◐ ○ ⚠`              | 全部运行 / 部分运行 / 全部停止 / 异常（崩溃循环或 RAG 未就绪），每 5 秒自动刷新                                                        |
+| 启动 / 停止 / 重启全部          | 一键 bootstrap/bootout 两个 launchd 服务（启动幂等：已在运行不会重启）                                                                 |
+| 摄入守护进程 / RAG 服务 子菜单  | 单独启停、重启、卸载（移除开机自启）、Terminal 实时日志                                                                                |
+| 🧹 清理已删笔记残留（同步索引） | 增量同步 RAG：移除已删除笔记的向量块 + 剔除 ai_context.md 失效归档条目（后台每 5 分钟也会自动执行；删除/清理测试笔记后点它立即生效）   |
+| ♻️ 重建 RAG 索引（清空后重建）  | 确认后清空整个向量库，再按当前仓库实际存在的笔记全量重建；清空测试库后点它让索引归零                                                   |
+| 🔍 综合健康检查                 | config / Vault 路径 / 嵌入模型 / LM Studio 端口 / `/health` `/status` / 进程退出码 逐项 ✔/✘                                            |
+| ⚠️ 最近错误分析                 | 增量监测 `~/Library/Logs/SmartVault/*.log` 自上次检查以来新增的 ERROR / Traceback / 启动失败（连续重复自动去重；历史旧错误不重复告警） |
+| 🖥 开机自启：菜单栏控制台       | 控制台自身的登录项开关（安装 `com.user.aibrain.menubar`）                                                                              |
+| 🧹 卸载全部 SmartVault 服务     | 停止并移除全部三个 launchd 登录项（代码与数据不受影响）                                                                                |
 
 说明：
 
@@ -274,10 +276,10 @@ open SmartVaultMenuBar.app           # 安装/唤醒 launchd 代理 → 状态�
 
 **架构事实**：所有注册 Vault 的笔记索引存放在**同一个本地向量库**（项目目录 `data/chroma/`，不在任何仓库文件夹内），靠索引键 `仓库名/相对路径` 隔离（如 `智能笔记/xx.md` 与 `工作库/yy.md` 互不干扰）。任何清理操作只动派生数据（向量与 `ai_context.md` 条目），**永远不会碰你的笔记文件**。
 
-| 操作 | 目标仓库 | 其他仓库 |
-|---|---|---|
-| 🧹 清理已删笔记残留（同步索引） | 移除已删文件向量 + 剔除 ai_context.md 死链 | **零影响**（现存文件 mtime/md5 未变，直接跳过） |
-| ♻️ 重建 RAG 索引（清空后重建） | 清空后重嵌 | 向量**一并清空、随后一起重建**；期间（几百篇约 1–2 分钟）问答可能不完整，完成后全部恢复 |
+| 操作                            | 目标仓库                                   | 其他仓库                                                                                |
+| ------------------------------- | ------------------------------------------ | --------------------------------------------------------------------------------------- |
+| 🧹 清理已删笔记残留（同步索引） | 移除已删文件向量 + 剔除 ai_context.md 死链 | **零影响**（现存文件 mtime/md5 未变，直接跳过）                                         |
+| ♻️ 重建 RAG 索引（清空后重建）  | 清空后重嵌                                 | 向量**一并清空、随后一起重建**；期间（几百篇约 1–2 分钟）问答可能不完整，完成后全部恢复 |
 
 多仓库日常清理用 🧹 即可（按文件粒度精确隔离）；♻️ 是全局操作，仅用于改分块参数、换嵌入模型、或彻底归零回收磁盘空间。
 
@@ -300,12 +302,12 @@ open SmartVaultMenuBar.app           # 安装/唤醒 launchd 代理 → 状态�
 1. **iWork 附件**：`.pages/.numbers/.key` 走 `QuickLook/Preview.pdf`，通常只含首页预览；需要全文请在 iWork 套件中导出 PDF 再拖入。
 2. **同仓库 wikilink 重名**：附件改名仅发生在目标目录已有同名文件时（追加 ` 2` 序号），正文引用会同步改写。
 3. **LM Studio 结构化输出**：优先使用 `response_format: json_schema`；旧版本不支持时自动回退纯提示词 + 鲁棒 JSON 解析（去围栏、截取花括号）。
-4. **LM Studio 上下文窗口**：归档会把草稿全文 + 仓库上下文整体发给模型（2 万字符草稿 ≈ 1.2 万 tokens），模型需以足够 context length 加载——建议 `lms load <model> -c 32768 --parallel 1`；超限时日志会给出明确指引，而非无效重试。
+4. **LM Studio 上下文窗口**：归档会把草稿全文 + 仓库上下文整体发给模型（2 万字符草稿 ≈ 1.2 万 tokens），模型需以足够 context length 加载——建议 `lms load <model> -c 32768 --parallel 1`；超限时日志会给出明确指引，而非无效重试。v1.12.0 起长附件转录自动分批提炼（不再全文直注），注入上限由 `attachment_prompt_max_chars` 单独控制（默认 12000），全文转录保全上限为 `attachment_max_chars`（默认 100000）。
 5. **首次索引较慢**：几千篇笔记约需几分钟（MPS 嵌入 ~1-2k chunks/秒），之后全部增量。
 6. **失败保护**：单篇草稿处理失败会保留在收件箱原处并记入日志，可用 `--scan` 或 `--once` 重试，绝不会静默丢稿。
 7. **手写识别上限与 VLM 主引擎**：OCR 转录仅作检索辅助（折叠块标注「以原附件为准」）。极潦草字迹（连笔快写）任何引擎都难超 ~70% 字准确率——RapidOCR 的 800px 归一化（v1.10.0）把真实潦草样本提到 67.6%，但极潦草样本上仅 21~44% 且专有名词全崩；v1.11.0 起 PDF 扫描页默认改用 **Qwen2.5-VL 主识别 + RapidOCR 兜底**（极潦草词级 67% vs 54%，语言先验能救回全崩的短语与人名；VLM 不可用时自动降级，无需干预）。代价：热推理 3.6~6s/页、JIT 冷启约 40s、约 5.5GB 显存常驻、偶发同义改写式幻觉；建议 LM Studio 中同时加载归档与 VLM 两模型避免切换；追求速度或未装 VLM 可 `ocr.engine: "rapidocr"` 回退纯 RapidOCR（图像附件路径不受影响，仍为 Vision+RapidOCR 双引擎）。
+8. **长附件分批提炼（v1.12.0）**：超长附件（如 100+ 页手写 PDF 转录数万字）归档时自动分批调 LLM 提炼要点——会多花几分钟推理时间（日志可见进度），但全文转录完整保存在终稿文末折叠块不受影响；提炼出的要点以独立「速览」折叠块附在全文块之前，并随终稿进入 RAG 索引。`processing.attachment_digest_enabled: false` 可关闭（退化为头裁剪注入）。
 
 ## 五、深入阅读
 
 - 架构图 / 模块地图 / 配置全字段语义 / 二次开发指南 / 故障排查 / 升级路线 → [PROJECT_DOC.md](PROJECT_DOC.md)
-
