@@ -7,6 +7,7 @@
 - 本控制台自身的“开机自启”开关（com.user.aibrain.menubar 登录项）
 - 综合健康检查（LM Studio / 嵌入模型 / 索引状态 / API 就绪）
 - 最近错误分析（增量监测各日志新增的 ERROR / Traceback / 启动失败，历史旧错误不重复告警）
+- 附件增补（v1.13.0：后台子进程为已归档笔记补齐未转录附件的 AI 转录）
 - 在 Terminal.app 实时跟踪日志
 
 启动方式（任选其一）：
@@ -335,20 +336,37 @@ _STATE_TEXT = {
 }
 
 
+def _build_reprocess_cmd() -> List[str]:
+    """附件增补子进程命令行（v1.13.0，纯函数便于单测）。
+
+    独立子进程跑 `--reprocess-all`（日志写 ingest_reprocess.log，由子进程自身
+    的 setup_logging 负责），stdout 交 devnull 防重复落盘、stderr 追加进同一
+    日志兜底未捕获异常；与常驻摄入守护进程可并行（写的文件集不相交）。
+    """
+    return [PYTHON_BIN, str(PROJECT_DIR / "ingest_daemon.py"),
+            "--config", str(PROJECT_DIR / "config.json"), "--reprocess-all"]
+
+
 class SmartVaultBar(rumps.App):
     def __init__(self):
         super().__init__(name="SmartVault", title="○", quit_button=None)
         self._menu_key: Optional[tuple] = None
+        self._reprocess_proc: Optional[subprocess.Popen] = None
         self.refresh(force=True)
 
     # ---------------- 状态刷新（仅状态变化时重建菜单，避免闪烁） ----------------
     def refresh(self, force: bool = False) -> None:
         ing, rag = svc_state(INGEST), svc_state(RAG)
-        key = (ing, rag, port_open(RAG_PORT), svc_info(MENUBAR)["installed"])
+        key = (ing, rag, port_open(RAG_PORT), svc_info(MENUBAR)["installed"],
+               self._reprocess_running())
         if force or key != self._menu_key:
             self._menu_key = key
             self.title = self._title_symbol(ing, rag)
             self._rebuild_menu(ing, rag)
+
+    def _reprocess_running(self) -> bool:
+        """附件增补子进程是否仍在运行（退出后菜单项自动恢复，≤5s）。"""
+        return bool(self._reprocess_proc and self._reprocess_proc.poll() is None)
 
     @staticmethod
     def _title_symbol(ing: str, rag: str) -> str:
@@ -378,6 +396,7 @@ class SmartVaultBar(rumps.App):
             rumps.separator,
             rumps.MenuItem("🧹 清理已删笔记残留（同步索引）", callback=self._sync_index),
             rumps.MenuItem("♻️ 重建 RAG 索引（清空后重建）…", callback=self._rebuild_index),
+            self._reprocess_menu_item(),
             rumps.separator,
             rumps.MenuItem("🔍 综合健康检查…", callback=self._full_check),
             rumps.MenuItem("⚠️ 最近错误分析…", callback=self._show_errors),
@@ -515,6 +534,53 @@ class SmartVaultBar(rumps.App):
                      "全量重建已启动：向量库已清空并开始按当前仓库重建。\n"
                      "若仓库已清空，完成后索引即为 0 条\n"
                      "（可用「综合健康检查」查看 chunks 数）。")
+
+    def _reprocess_menu_item(self) -> rumps.MenuItem:
+        """📎 增补菜单项：运行中显示禁用态文案（完成自动恢复，refresh 轮询驱动）。"""
+        if self._reprocess_running():
+            return rumps.MenuItem("📎 附件增补处理中…（完成自动恢复）")
+        return rumps.MenuItem("📎 增补处理未转录附件…", callback=self._reprocess_attachments)
+
+    def _reprocess_attachments(self, _):
+        """附件增补（v1.13.0）：为已归档笔记解析后来新增的附件并追加转录块。"""
+        if self._reprocess_running():
+            self._notify("增补处理未转录附件", False,
+                         "已有一次增补正在后台执行，请等待菜单项恢复（每 5 秒自动刷新）。")
+            return
+        lm_hint = "" if port_open(LM_STUDIO_PORT) else (
+            "⚠ 未检测到 LM Studio（:1234）：长附件的要点提炼将不可用，\n"
+            "OCR / Whisper / PDF 文本层等基础转录不受影响。\n\n")
+        w = rumps.Window(
+            title="增补处理未转录附件",
+            message="扫描全部仓库：为「正文引用了附件但文末没有对应转录块」的\n"
+                    "已归档笔记解析附件（OCR / Whisper / PDF / Office）并把转录\n"
+                    "追加到文末折叠块，RAG 索引随后自动更新（≤5 分钟）。\n\n"
+                    "只追加转录块：不改正文、属性、目录与文件名。\n"
+                    "长附件会分批提炼要点，耗时几分钟属正常。\n"
+                    "开始前请先保存并关闭正在编辑的笔记。\n\n"
+                    + lm_hint +
+                    "确认请点 OK。",
+            dimensions=(560, 340))
+        if not w.run().clicked:
+            return
+        try:
+            err = open(LOG_DIR / "ingest_reprocess.log", "a", encoding="utf-8")
+            try:
+                # stdout 交 devnull（子进程自带文件日志，防重复落盘）；
+                # stderr 追加进同一日志兜底未捕获异常（崩溃 traceback 不丢失）
+                proc = subprocess.Popen(_build_reprocess_cmd(), cwd=str(PROJECT_DIR),
+                                        stdout=subprocess.DEVNULL, stderr=err)
+            finally:
+                err.close()
+        except Exception as e:  # noqa: BLE001
+            self._notify("增补处理未转录附件", False, f"子进程启动失败：{e!r}")
+            return
+        self._reprocess_proc = proc
+        self.refresh(force=True)
+        self._notify("增补处理未转录附件", True,
+                     "已在后台启动（与归档守护进程互不干扰）。\n"
+                     "处理进度见日志 ingest_reprocess.log；\n"
+                     "完成后菜单项自动恢复，RAG 索引随后自动更新。")
 
     def _am_launchd_instance(self) -> bool:
         """当前控制台进程是否由 launchd 作业 MENUBAR 运行（bootout 会终止自身）。"""

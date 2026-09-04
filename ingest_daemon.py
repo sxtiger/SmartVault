@@ -27,6 +27,8 @@ SmartVault / 智能仓库 —— 模块 A：自动化摄入与归档守护进程
   python ingest_daemon.py --check                   # 环境自检
   python ingest_daemon.py --scan                    # 一次性处理收件箱积压草稿后退出
   python ingest_daemon.py --once 草稿.md --vault 工作笔记   # 调试单篇草稿
+  python ingest_daemon.py --reprocess 笔记.md --vault 工作笔记  # 已归档笔记增补新附件转录
+  python ingest_daemon.py --reprocess-all           # 扫描全部仓库补齐未转录附件（写 ingest_reprocess.log）
 """
 from __future__ import annotations
 
@@ -159,13 +161,20 @@ def load_config(path: Path) -> Dict[str, Any]:
     return cfg
 
 
-def setup_logging(cfg: Dict[str, Any], level: int = logging.INFO) -> None:
+def setup_logging(cfg: Dict[str, Any], level: int = logging.INFO,
+                  log_name: str = "ingest_daemon.log") -> None:
+    """初始化日志（RotatingFileHandler + stdout）。
+
+    log_name（v1.13.0）：附件增补（--reprocess / --reprocess-all）是独立子进程，
+    写独立 ingest_reprocess.log——避免与常驻守护进程两个进程同写
+    ingest_daemon.log 造成轮转竞态（rotate 时互相 rename 导致日志错乱）。
+    """
     log_dir = Path(cfg["log_dir_abs"])
     log_dir.mkdir(parents=True, exist_ok=True)
     fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
     LOG.setLevel(level)
     LOG.handlers.clear()
-    fh = RotatingFileHandler(log_dir / "ingest_daemon.log", maxBytes=2 * 1024 * 1024,
+    fh = RotatingFileHandler(log_dir / log_name, maxBytes=2 * 1024 * 1024,
                              backupCount=3, encoding="utf-8")
     fh.setFormatter(fmt)
     sh = logging.StreamHandler(sys.stdout)
@@ -1699,6 +1708,208 @@ def run_pipeline(cfg: Dict[str, Any], client: LLMClient, vault: Vault,
     return final_md
 
 
+# ================================================================== 附件增补（v1.13.0）
+# 已归档笔记事后补充附件的转录管线：解析正文引用 → 与文末转录区已有清单做差集 →
+# 新附件走 dispatch_attachment + prepare_attachment_blocks → 原地追加转录块。
+# 不重新归档、不改 frontmatter / 正文 / 目录 / 文件名 / ai_context（要重新分类仍走
+# 「移回收件箱重归档」老办法，两者分工）；幂等：转录块头「◆ 附件「name」｜kind」
+# 即已转录清单，重复运行零副作用；写盘仅 mtime 变化 → RAG 增量索引下轮 sync
+# （≤300s）自动重嵌该文件向量，无需手动 reindex。
+TRANSCRIPT_SECTION_RE = re.compile(r"^##[ \t]*附：附件转录", re.M)
+TRANSCRIPT_BLOCK_HEADER_RE = re.compile(r"^>[ \t]*\[!quote\][ \t]*-[ \t]*◆[ \t]*附件「(.+?)」", re.M)
+
+
+def parse_transcribed_attachments(md_text: str) -> set:
+    """提取笔记文末转录区已转录的附件名集合（增补幂等判据）。
+
+    build_preserved_content / append_transcription_blocks 渲染的转录块头为
+    ``> [!quote]- ◆ 附件「name」｜kind``；正文里的普通引用（无 > 引用前缀）
+    不会误判。任何 kind（含历史「未找到」/「解析失败」占位）都算已处理——
+    增补只管「从无到有」，失败重试请删对应转录块后重跑或移回收件箱重归档。
+    """
+    return set(TRANSCRIPT_BLOCK_HEADER_RE.findall(md_text or ""))
+
+
+def append_transcription_blocks(md_text: str, new_blocks: List[str]) -> str:
+    """把新附件转录块追加到文末转录区（无该区则按归档同款格式创建）。
+
+    只动文末转录区：frontmatter 与正文逐字不动；新块渲染为独立 ``> [!quote]-``
+    折叠块，格式与 build_preserved_content 完全一致（无转录区时结果与其逐字节
+    等价，单测锁定）；若用户在转录区后手工追加过内容，新块插在转录区末尾与
+    其前，不打断用户内容。空 new_blocks 原样返回（零副作用）。
+    """
+    if not new_blocks:
+        return md_text
+    rendered: List[str] = []
+    for block in new_blocks:
+        header, _, text = block.partition("\n")
+        rendered.append(f"> [!quote]- {header}")
+        body_lines = (text or "（空转录）").splitlines() or ["（空转录）"]
+        rendered.extend(f"> {ln}".rstrip() for ln in body_lines)
+        rendered.append("")
+    rendered_text = "\n".join(rendered).rstrip("\n")
+    text = md_text.rstrip("\n")
+
+    lines = text.split("\n")
+    header_idx = next((i for i, ln in enumerate(lines) if TRANSCRIPT_SECTION_RE.match(ln)),
+                      None)
+    if header_idx is None:
+        # 无转录区：按归档同款格式创建（与 build_preserved_content 逐字节一致）
+        return (text + "\n\n## 附：附件转录（机器自动生成，仅供检索，若有出入以原附件为准）\n\n"
+                + rendered_text + "\n")
+    # 已有转录区：插到该区末尾——自区头起连续的 > 引用行/空行之后
+    end = header_idx + 1
+    while end < len(lines) and (not lines[end].strip() or lines[end].startswith(">")):
+        end += 1
+    while end > header_idx + 1 and not lines[end - 1].strip():  # 不在用户内容前垫空行
+        end -= 1
+    return "\n".join(lines[:end] + ["", rendered_text] + lines[end:]) + "\n"
+
+
+def _build_vault_name_index(vault: Vault) -> Dict[str, List[Path]]:
+    """全仓库附件名索引（小写文件名 -> 路径列表，批量增补的兜底加速用）。
+
+    排除收件箱（其中的文件属于待归档草稿，不属于任何已归档笔记）与隐藏目录
+    （.smartvault 备份区 / .obsidian 等）；只索引文件，O(仓库文件数) 一次构建。
+    """
+    index: Dict[str, List[Path]] = {}
+    inbox_resolved = vault.inbox.resolve()
+    for f in vault.root.rglob("*"):
+        try:
+            if not f.is_file() or f.name.startswith("."):
+                continue
+        except OSError:
+            continue
+        rel = f.relative_to(vault.root)
+        if any(p.startswith(".") for p in rel.parts[:-1]):
+            continue
+        try:
+            f.resolve().relative_to(inbox_resolved)
+            continue
+        except ValueError:
+            pass
+        index.setdefault(f.name.lower(), []).append(f)
+    return index
+
+
+def resolve_archived_attachment(vault: Vault, note_path: Path, ref_name: str,
+                                name_index: Optional[Dict[str, List[Path]]] = None
+                                ) -> Optional[Path]:
+    """为已归档笔记定位附件（v1.13.0 增补管线专用）。
+
+    查找顺序：① 笔记所在目录（含「附件/」子目录，复用 resolve_attachment 的
+    精确名 → 无扩展名补全 → 递归大小写不敏感匹配）——归档产物都在这里；
+    ② 全仓库兜底（name_index 未提供时现建，批量场景应预建一次复用）——
+    排除收件箱与隐藏目录；同名多处存在时取首个匹配（Obsidian wikilink 语义
+    本身按名解析，无法从引用判断具体是哪个）。
+    """
+    p = resolve_attachment(note_path.parent, ref_name)
+    if p is not None:
+        return p
+    ref_name = ref_name.strip()
+    want = {ref_name.lower()}
+    if not Path(ref_name).suffix:  # 引用无扩展名时按可解析扩展名补全
+        want |= {(Path(ref_name).stem + ext).lower() for ext in sorted(ATTACHMENT_EXTS)}
+    if name_index is None:
+        name_index = _build_vault_name_index(vault)
+    for key in want:
+        if key in name_index:
+            return name_index[key][0]
+    return None
+
+
+def run_reprocess(cfg: Dict[str, Any], client: LLMClient, vault: Vault, md_path: Path,
+                  name_index: Optional[Dict[str, List[Path]]] = None) -> Dict[str, int]:
+    """单篇已归档笔记的附件增补：为正文新引用的附件追加转录块（v1.13.0）。
+
+    与收件箱管线的关键差异——「只加不改」：不动 frontmatter / 正文 / 目录 /
+    文件名 / ai_context，不移动原附件，不唤醒 Obsidian；新附件按
+    dispatch_attachment 全类型解析 + prepare_attachment_blocks 保全（长附件
+    同样分批提炼出速览块，client 仅此时使用），转录块经
+    append_transcription_blocks 原地追加。附件找不到时跳过并告警，不写
+    「未找到」占位块（防历史遗留引用反复增补时占位块越积越多）。
+    返回 {refs, already, added, missing} 统计。
+    """
+    started = time.time()
+    raw = md_path.read_text(encoding="utf-8", errors="replace").lstrip("\ufeff")
+    refs = find_attachment_refs(raw)
+    done_names = parse_transcribed_attachments(raw)
+    stats = {"refs": len(refs), "already": 0, "added": 0, "missing": 0}
+    new_blocks: List[str] = []
+    for ref in refs:
+        if Path(ref).name in done_names:  # 引用可能带子目录前缀，按文件名比对
+            stats["already"] += 1
+            continue
+        p = resolve_archived_attachment(vault, md_path, ref, name_index=name_index)
+        if p is None:
+            stats["missing"] += 1
+            LOG.warning("[%s] 增补跳过（附件未找到，不写占位块）：%s <- %s",
+                        vault.name, md_path.name, ref)
+            continue
+        if not _wait_file_stable(p, checks=6, interval=1.0):
+            LOG.warning("附件大小持续变化，按当前状态尽力解析：%s", p.name)
+        kind, text = dispatch_attachment(p, cfg)
+        blocks, _inject = prepare_attachment_blocks(p.name, kind, text, cfg, client)
+        new_blocks.extend(blocks)
+        stats["added"] += 1
+    if new_blocks:
+        md_path.write_text(append_transcription_blocks(raw, new_blocks), encoding="utf-8")
+    LOG.info("[%s] 附件增补完成：%s（引用 %d 份：新增 %d / 已转录 %d / 未找到 %d，耗时 %.1fs）",
+             vault.name, md_path.name, stats["refs"], stats["added"],
+             stats["already"], stats["missing"], time.time() - started)
+    return stats
+
+
+def run_reprocess_all(cfg: Dict[str, Any], client: LLMClient) -> int:
+    """扫描全部注册仓库，为「引用了附件但未全部转录」的已归档笔记增补（v1.13.0）。
+
+    两阶段：先收集候选（只读），再逐篇 run_reprocess——收件箱草稿（归档管线
+    的职责）、隐藏目录（.smartvault 备份区等）、ai_context.md、全部引用均已
+    转录的笔记（幂等快路径，不解析附件不调 LLM）一律跳过。候选非空才预建
+    一次 _build_vault_name_index 复用（避免每篇笔记全仓库 rglob）。
+    可与常驻守护进程并行：双方写的文件集不相交（守护进程只动收件箱草稿与
+    ai_context，增补只改已归档笔记文末）；LM Studio 请求由服务端排队。
+    """
+    inbox_name = cfg["inbox_folder_name"]
+    notes = added = 0
+    for vault in build_vaults(cfg):
+        candidates: List[Path] = []
+        for f in sorted(vault.root.rglob("*.md")):
+            rel = f.relative_to(vault.root).parts
+            if not rel or f.name.startswith("."):
+                continue
+            if rel[0] == inbox_name or any(p.startswith(".") for p in rel[:-1]):
+                continue
+            if f == vault.context_file:
+                continue
+            try:
+                raw = f.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                LOG.exception("[%s] 读取失败，跳过：%s", vault.name, f)
+                continue
+            refs = find_attachment_refs(raw)
+            if not refs:
+                continue
+            done_names = parse_transcribed_attachments(raw)
+            if all(Path(r).name in done_names for r in refs):
+                continue  # 幂等快路径：全部已转录，零成本跳过
+            candidates.append(f)
+        if not candidates:
+            LOG.info("[%s] 未发现需要增补的笔记", vault.name)
+            continue
+        LOG.info("[%s] 发现 %d 篇笔记待增补，开始处理……", vault.name, len(candidates))
+        name_index = _build_vault_name_index(vault)
+        for f in candidates:
+            try:
+                stats = run_reprocess(cfg, client, vault, f, name_index=name_index)
+                notes += 1
+                added += stats["added"]
+            except Exception:  # noqa: BLE001 —— 单篇失败不中断整体
+                LOG.exception("[%s] 附件增补失败（笔记保持原样）：%s", vault.name, f)
+    LOG.info("附件增补扫描完成：处理 %d 篇笔记，新增转录 %d 份", notes, added)
+    return 0
+
+
 # ================================================================== 监听与调度
 class VaultState:
     """单个 Vault 的监听状态：防抖队列 + 处理工作线程。"""
@@ -1938,16 +2149,37 @@ def main() -> None:
     parser.add_argument("--check", action="store_true", help="环境自检后退出")
     parser.add_argument("--scan", action="store_true", help="处理积压草稿后退出")
     parser.add_argument("--once", metavar="DRAFT_MD", help="调试：处理单篇草稿")
-    parser.add_argument("--vault", metavar="NAME", help="配合 --once 指定 Vault 名称")
+    parser.add_argument("--reprocess", metavar="NOTE_MD",
+                        help="增补：为已归档笔记追加新引用附件的转录块（不动正文/元数据）")
+    parser.add_argument("--reprocess-all", action="store_true",
+                        help="增补：扫描全部仓库，补齐所有未转录的附件引用")
+    parser.add_argument("--vault", metavar="NAME", help="配合 --once / --reprocess 指定 Vault 名称")
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
 
     cfg = load_config(Path(args.config))
-    setup_logging(cfg, getattr(logging, args.log_level.upper(), logging.INFO))
+    # v1.13.0：增补模式是独立子进程，写独立日志，避免与常驻守护进程同写一文件轮转竞态
+    reprocess_mode = bool(args.reprocess or args.reprocess_all)
+    setup_logging(cfg, getattr(logging, args.log_level.upper(), logging.INFO),
+                  "ingest_reprocess.log" if reprocess_mode else "ingest_daemon.log")
     if args.check:
         sys.exit(run_check(cfg))
     if args.scan:
         sys.exit(run_scan(cfg))
+    if args.reprocess_all:
+        sys.exit(run_reprocess_all(cfg, LLMClient(cfg)))
+    if args.reprocess:
+        vaults = {v.name: v for v in build_vaults(cfg)}
+        key = args.vault or ""
+        if key not in vaults:
+            raise SystemExit(f"--vault 必须是以下之一：{', '.join(vaults)}")
+        note = Path(args.reprocess).expanduser()
+        if not note.is_absolute():
+            note = vaults[key].root / note  # 已归档笔记位于仓库任意位置：相对路径基于仓库根
+        if not note.is_file():
+            raise SystemExit(f"笔记不存在：{note}")
+        run_reprocess(cfg, LLMClient(cfg), vaults[key], note)
+        sys.exit(0)
     if args.once:
         vaults = {v.name: v for v in build_vaults(cfg)}
         key = args.vault or ""
