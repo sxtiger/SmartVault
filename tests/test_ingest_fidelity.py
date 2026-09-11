@@ -212,7 +212,7 @@ class TestAppendAiContext(unittest.TestCase):
                 "# ai_context\n\n## AI 处理规则\n\n规则。\n\n## 历史归档索引\n"
                 "\n## 2026-08-30 21:15｜SmartVault 归档\n"
                 "- 文件：[[旧目录/示例笔记|示例笔记]]\n"
-                "- 目录：智能笔记/旧目录\n- 摘要：旧\n- 标签：#旧\n"
+                "- 目录：旧库/旧目录\n- 摘要：旧\n- 标签：#旧\n"
                 "\n## 2026-08-30 21:16｜SmartVault 归档\n"
                 "- 文件：[[开发环境/无关笔记|无关笔记]]\n"
                 "- 目录：开发环境\n- 摘要：无关\n- 标签：#Git\n",
@@ -234,6 +234,16 @@ class TestAppendAiContext(unittest.TestCase):
             text = v.context_file.read_text(encoding="utf-8")
             self.assertIn("## AI 处理规则", text)
             self.assertIn("[[网络工具/示例笔记|示例笔记]]", text)
+
+    def test_tags_line_space_after_colon(self):
+        """v1.13.1：标签行冒号后必须有空格，否则 Obsidian 无法识别首个 #标签。"""
+        with tempfile.TemporaryDirectory() as d:
+            v = self._vault(d)
+            final_md = v.root / "网络工具" / "示例笔记.md"
+            sv.append_ai_context(v, self._meta("网络工具"), final_md)
+            text = v.context_file.read_text(encoding="utf-8")
+            self.assertIn("- 标签： #A #B #C\n", text)
+            self.assertNotIn("标签：#", text)
 
     def test_prompt_locks_short_draft_rule(self):
         """SYSTEM_PROMPT 须含超短草稿防蹭目录规则（防后续误删回归）。"""

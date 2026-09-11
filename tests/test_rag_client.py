@@ -139,7 +139,7 @@ class PruneAiContextTests(unittest.TestCase):
         """复刻 append_ai_context 的条目格式。"""
         return (f"\n## {ts}｜SmartVault 归档\n"
                 f"- 文件：[[{link}|{alias}]]\n"
-                f"- 目录：未分类\n- 摘要：s\n- 标签：#t\n")
+                f"- 目录：未分类\n- 摘要：s\n- 标签： #t\n")
 
     def test_dead_removed_alive_kept(self):
         """死链条目整段剔除，活条目与固定头部完整保留。"""

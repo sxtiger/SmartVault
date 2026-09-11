@@ -48,7 +48,7 @@ brew install python@3.12 ffmpeg
 ### 2. Python 虚拟环境与依赖
 
 ```bash
-cd /path/to/SmartVault
+cd /path/to/SmartVault   # 换成你的实际项目路径
 /opt/homebrew/bin/python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt

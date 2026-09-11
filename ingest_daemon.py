@@ -1051,7 +1051,8 @@ def append_ai_context(vault: Vault, meta: Dict[str, Any], final_md: Path) -> Non
         f"- 文件：[[{link}|{final_md.stem}]]\n"
         f"- 目录：{meta.get('target_folder', '')}\n"
         f"- 摘要：{meta.get('summary', '')}\n"
-        f"- 标签：{tags_line}\n"
+        # 标签行冒号后必须留一个空格：紧贴全角冒号的 #标签 Obsidian 无法识别（v1.13.1）
+        f"- 标签： {tags_line}\n"
     )
     if not path.exists():
         path.write_text(
