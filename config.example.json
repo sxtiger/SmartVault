@@ -10,7 +10,7 @@
     "timeout_seconds": 300,
     "structured_output": true
   },
-  "inbox_folder_name": "待处理笔记",
+  "inbox_folder_name": "!待处理笔记",
   "context_file": "ai_context.md",
   "ai_context_max_chars": 6000,
   "tree_depth": 2,
@@ -70,7 +70,7 @@
     "chunk_overlap": 80,
     "top_k": 4,
     "rescan_seconds": 300,
-    "exclude_folders": [".obsidian", ".trash", ".smartvault", "待处理笔记"]
+    "exclude_folders": [".obsidian", ".trash", ".smartvault", "!待处理笔记"]
   },
   "api": {
     "host": "127.0.0.1",

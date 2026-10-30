@@ -63,7 +63,7 @@ class TestBuildUserPromptConservativeMode(unittest.TestCase):
 
 class TestChooseTargetDirVaultPrefix(unittest.TestCase):
     def _vault(self, root: Path) -> sv.Vault:
-        return sv.Vault(name="智能笔记", root=root, inbox=root / "待处理笔记",
+        return sv.Vault(name="智能笔记", root=root, inbox=root / "!待处理笔记",
                         context_file=root / "ai_context.md")
 
     def _proc(self) -> dict:
@@ -75,7 +75,7 @@ class TestChooseTargetDirVaultPrefix(unittest.TestCase):
             root = Path(d)
             (root / "BMO" / "Profiles").mkdir(parents=True)
             got = sv.choose_target_dir(self._vault(root), "智能笔记/BMO/Profiles",
-                                       self._proc(), "待处理笔记")
+                                       self._proc(), "!待处理笔记")
             self.assertEqual(got, root / "BMO" / "Profiles")
 
     def test_plain_two_level_path_unaffected(self):
@@ -83,21 +83,21 @@ class TestChooseTargetDirVaultPrefix(unittest.TestCase):
             root = Path(d)
             (root / "就业指导").mkdir()
             got = sv.choose_target_dir(self._vault(root), "就业指导",
-                                       self._proc(), "待处理笔记")
+                                       self._proc(), "!待处理笔记")
             self.assertEqual(got, root / "就业指导")
 
     def test_overlong_path_still_falls_back(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             got = sv.choose_target_dir(self._vault(root), "A/B/C/D",
-                                       self._proc(), "待处理笔记")
+                                       self._proc(), "!待处理笔记")
             self.assertEqual(got, root / "未分类")
 
 
 class TestBackupDraft(unittest.TestCase):
     def test_backup_created_and_content_intact(self):
         with tempfile.TemporaryDirectory() as d:
-            root, inbox = Path(d), Path(d) / "待处理笔记"
+            root, inbox = Path(d), Path(d) / "!待处理笔记"
             inbox.mkdir()
             md = inbox / "草稿.md"
             md.write_text("重要原文，不可丢失", encoding="utf-8")
@@ -109,7 +109,7 @@ class TestBackupDraft(unittest.TestCase):
 
     def test_backup_rotation_keeps_recent(self):
         with tempfile.TemporaryDirectory() as d:
-            root, inbox = Path(d), Path(d) / "待处理笔记"
+            root, inbox = Path(d), Path(d) / "!待处理笔记"
             inbox.mkdir()
             bdir = root / ".smartvault" / "backup"
             bdir.mkdir(parents=True)
@@ -197,7 +197,7 @@ class TestAppendAiContext(unittest.TestCase):
         root = Path(d) / "库"
         (root / "网络工具").mkdir(parents=True)
         (root / "网络工具" / "示例笔记.md").write_text("x", encoding="utf-8")
-        return sv.Vault(name="库", root=root, inbox=root / "待处理笔记",
+        return sv.Vault(name="库", root=root, inbox=root / "!待处理笔记",
                         context_file=root / "ai_context.md")
 
     @staticmethod

@@ -112,7 +112,7 @@ class TestResolveArchivedAttachment(unittest.TestCase):
         self.note = self.note_dir / "笔记.md"
         self.note.write_text("# 笔记\n", encoding="utf-8")
         self.vault = sv.Vault(name="测试库", root=self.root,
-                              inbox=self.root / "待处理笔记",
+                              inbox=self.root / "!待处理笔记",
                               context_file=self.root / "ai_context.md")
 
     def tearDown(self):
@@ -162,7 +162,7 @@ class TestRunReprocess(unittest.TestCase):
             "---\ntitle: 会议\n---\n\n# 会议\n\n看这张图：![[新增截图.png]]\n",
             encoding="utf-8")
         self.vault = sv.Vault(name="测试库", root=self.root,
-                              inbox=self.root / "待处理笔记",
+                              inbox=self.root / "!待处理笔记",
                               context_file=self.root / "ai_context.md")
         self.cfg = _test_cfg()
 
@@ -244,7 +244,7 @@ class TestRunReprocessAll(unittest.TestCase):
         (self.root / "项目" / "b.png").write_bytes(b"png")
         b_before = (self.root / "项目" / "b.md").read_text(encoding="utf-8")
         # ③ 收件箱草稿：归档管线的职责，增补不动
-        inbox = self.root / "待处理笔记"
+        inbox = self.root / "!待处理笔记"
         inbox.mkdir(parents=True, exist_ok=True)
         (inbox / "c.md").write_text("图：![[c.png]]\n", encoding="utf-8")
         (inbox / "c.png").write_bytes(b"png")

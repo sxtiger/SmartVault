@@ -5,7 +5,7 @@ SmartVault / 智能仓库 —— 模块 A：自动化摄入与归档守护进程
 ================================================================================
 职责：
   1. 读取外部 config.json，注册多个 Obsidian Vault，用 watchdog 同时监听每个
-     Vault 内部统一名称的「待处理笔记」收件箱目录。
+     Vault 内部统一名称的「!待处理笔记」收件箱目录。
   2. 实时捕获拖入的 Markdown 草稿及附件，按扩展名路由多模态解析：
        图像   (.png/.jpg/.jpeg/.heic...)   -> ocrmac（macOS Vision / Neural Engine）；
                                               auto 模式下 Vision 未识别到文字时 RapidOCR 兜底（手写）
@@ -106,7 +106,7 @@ CONFIG_DEFAULTS: Dict[str, Any] = {
         "timeout_seconds": 300,
         "structured_output": True,
     },
-    "inbox_folder_name": "待处理笔记",
+    "inbox_folder_name": "!待处理笔记",
     "context_file": "ai_context.md",
     "ai_context_max_chars": 6000,
     "tree_depth": 2,
@@ -128,7 +128,7 @@ CONFIG_DEFAULTS: Dict[str, Any] = {
     "rag": {"enabled": True, "embedding_model_path": "models/bge-small-zh-v1.5",
             "embedding_device": "mps", "chroma_dir": "data/chroma", "collection_name": "smartvault",
             "chunk_size": 500, "chunk_overlap": 80, "top_k": 4, "rescan_seconds": 300,
-            "exclude_folders": [".obsidian", ".trash", "待处理笔记"]},
+            "exclude_folders": [".obsidian", ".trash", "!待处理笔记"]},
     "api": {"host": "127.0.0.1", "port": 8788},
     "vaults": [],
     "log_dir": "~/Library/Logs/SmartVault",
@@ -190,7 +190,7 @@ class Vault:
     """一个被监听的 Obsidian 仓库。"""
     name: str          # Obsidian 中的仓库名（用于 URI 唤醒与展示）
     root: Path         # 仓库根目录
-    inbox: Path        # 收件箱目录（待处理笔记）
+    inbox: Path        # 收件箱目录（!待处理笔记）
     context_file: Path  # 仓库根下的 ai_context.md
 
 
@@ -1182,7 +1182,7 @@ SYSTEM_PROMPT = """你是「SmartVault 智能仓库」的资深知识管理图�
    - "link_terms": 字符串数组，正文中实际出现的关键专有名词（软件工具、通信协议、设备型号、技术名词、书名项目等），0~8 个、每个不超过 24 字符，必须逐字摘自草稿原文；系统将以确定性代码据此在正文上包裹 [[双链]]（不改任何其他字符）。
 
 【整理规则】
-1. target_folder 必须优先从用户给出的“仓库目录树”中选择已有目录；目录树中确无合适目录时，须依据笔记主题**新建简洁的一级目录**（2~6 个字，如“开发环境”“AI 工具”“网络工具”），让分类体系随归档自然生长，同主题笔记后续复用同一目录；最多二级深度；严禁使用“待处理笔记”、仓库根目录，以及“未分类”“笔记”“文档”“其他”等无信息量的目录名。
+1. target_folder 必须优先从用户给出的“仓库目录树”中选择已有目录；目录树中确无合适目录时，须依据笔记主题**新建简洁的一级目录**（2~6 个字，如“开发环境”“AI 工具”“网络工具”），让分类体系随归档自然生长，同主题笔记后续复用同一目录；最多二级深度；严禁使用“!待处理笔记”、仓库根目录，以及“未分类”“笔记”“文档”“其他”等无信息量的目录名。
 2. optimized_content 遵守 Obsidian Markdown 规范：文件内不要重复一级标题（标题由文件名承担），用二级/三级标题分节，善用列表与引用；正文中的所有事实、数字、百分比、指标、人名、结论必须逐字来自草稿原文或附件转录，严禁编造原文不存在的任何数字、比例或事实；整理仅限标题层级、列表化与删除冗余空白，禁止缩写、扩写或补充原文没有的内容；草稿为对话/问答体时必须保持原有问答结构与措辞，禁止重组为摘要式笔记。
 3. 双链注入由系统代码完成：你只需在 link_terms 列出正文中实际出现的关键专有名词（软件工具、通信协议、设备型号、技术名词、书名项目，0~8 个，目录树已有目录名对应的实体优先）；严禁在 optimized_content 中自行添加、改写或删除 [[双链]]。
 4. 附件的解析文本必须融入正文：以“> [!quote]- 附件：文件名”折叠引用块或独立小节呈现，冗长转录可提炼要点但不得丢失信息。

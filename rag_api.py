@@ -64,14 +64,14 @@ _STATE_PATH = "data/index_state.json"  # 相对 config.json 目录
 CONFIG_DEFAULTS: Dict[str, Any] = {
     "lm_studio": {"base_url": "http://localhost:1234/v1", "chat_model": "qwen2.5-7b-instruct",
                   "temperature": 0.3, "max_tokens": 4096, "timeout_seconds": 300},
-    "inbox_folder_name": "待处理笔记",
+    "inbox_folder_name": "!待处理笔记",
     "context_file": "ai_context.md",
     "vaults": [],
     "log_dir": "~/Library/Logs/SmartVault",
     "rag": {"enabled": True, "embedding_model_path": "models/bge-small-zh-v1.5",
             "embedding_device": "mps", "chroma_dir": "data/chroma", "collection_name": "smartvault",
             "chunk_size": 500, "chunk_overlap": 80, "top_k": 4, "rescan_seconds": 300,
-            "exclude_folders": [".obsidian", ".trash", "待处理笔记"]},
+            "exclude_folders": [".obsidian", ".trash", "!待处理笔记"]},
     "api": {"host": "127.0.0.1", "port": 8788},
 }
 

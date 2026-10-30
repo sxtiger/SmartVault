@@ -174,14 +174,14 @@ class TestTreeAndContext(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             (root / ".obsidian").mkdir()
-            (root / "待处理笔记").mkdir()
+            (root / "!待处理笔记").mkdir()
             (root / "会议记录").mkdir()
             (root / "会议记录" / "周会").mkdir()
-            tree = sv.scan_tree(root, depth=2, exclude_names=frozenset({"待处理笔记"}))
+            tree = sv.scan_tree(root, depth=2, exclude_names=frozenset({"!待处理笔记"}))
             self.assertIn("会议记录/", tree)
             self.assertIn("周会/", tree)
             self.assertNotIn(".obsidian", tree)
-            self.assertNotIn("待处理笔记", tree)
+            self.assertNotIn("!待处理笔记", tree)
 
     def test_load_ai_context_head_tail_split(self):
         with tempfile.TemporaryDirectory() as d:
@@ -200,7 +200,7 @@ class TestTreeAndContext(unittest.TestCase):
 
 class TestChooseTargetDir(unittest.TestCase):
     def _vault(self, root: Path) -> sv.Vault:
-        return sv.Vault(name="测试", root=root, inbox=root / "待处理笔记",
+        return sv.Vault(name="测试", root=root, inbox=root / "!待处理笔记",
                         context_file=root / "ai_context.md")
 
     PROC = {"allow_new_folder": True, "max_folder_depth": 2, "fallback_folder": "未分类"}
@@ -209,27 +209,27 @@ class TestChooseTargetDir(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             (root / "会议记录").mkdir()
-            got = sv.choose_target_dir(self._vault(root), "会议记录", self.PROC, "待处理笔记")
+            got = sv.choose_target_dir(self._vault(root), "会议记录", self.PROC, "!待处理笔记")
             self.assertEqual(got, root / "会议记录")
 
     def test_new_folder_created_within_depth(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
-            got = sv.choose_target_dir(self._vault(root), "读书笔记/哲学", self.PROC, "待处理笔记")
+            got = sv.choose_target_dir(self._vault(root), "读书笔记/哲学", self.PROC, "!待处理笔记")
             self.assertTrue(got.is_dir())
             self.assertEqual(got.name, "哲学")
 
     def test_too_deep_falls_back(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
-            got = sv.choose_target_dir(self._vault(root), "a/b/c/d", self.PROC, "待处理笔记")
+            got = sv.choose_target_dir(self._vault(root), "a/b/c/d", self.PROC, "!待处理笔记")
             self.assertEqual(got.name, "未分类")
 
     def test_inbox_forbidden(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
-            (root / "待处理笔记").mkdir()
-            got = sv.choose_target_dir(self._vault(root), "待处理笔记", self.PROC, "待处理笔记")
+            (root / "!待处理笔记").mkdir()
+            got = sv.choose_target_dir(self._vault(root), "!待处理笔记", self.PROC, "!待处理笔记")
             self.assertEqual(got.name, "未分类")
 
 
